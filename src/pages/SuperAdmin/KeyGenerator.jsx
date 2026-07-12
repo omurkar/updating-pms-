@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { db } from '../../firebase';
 import { collection, doc, setDoc, serverTimestamp } from 'firebase/firestore';
 
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+
 // ─── SHA-256 Hashing via the native Web Crypto API ───────────────────────────
 const sha256 = async (text) => {
   const encoder = new TextEncoder();
@@ -105,7 +107,7 @@ const KeyGenerator = ({ asModal = false, onClose }) => {
       };
 
       // 4. Write via backend API (uses Firebase Admin SDK — bypasses all Firestore rules)
-      const response = await fetch('http://localhost:5000/api/product-keys/create', {
+      const response = await fetch(`${API_URL}/api/product-keys/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(keyDocument),

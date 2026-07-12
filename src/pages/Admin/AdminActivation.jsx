@@ -6,6 +6,8 @@ import {
 } from 'firebase/firestore';
 import { createUserWithEmailAndPassword, updateProfile } from 'firebase/auth';
 
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+
 const AdminActivation = () => {
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
@@ -40,7 +42,7 @@ const AdminActivation = () => {
     try {
       // 1. Validate key via backend API (Admin SDK — no Firestore rules blocking this)
       const response = await fetch(
-        `http://localhost:5000/api/product-keys/validate?key=${encodeURIComponent(formData.productKey)}`
+        `${API_URL}/api/product-keys/validate?key=${encodeURIComponent(formData.productKey)}`
       );
       const data = await response.json();
 
@@ -63,7 +65,7 @@ const AdminActivation = () => {
       setProductKeyDoc({ id: data.docId, data: () => data });
 
       // 3. Trigger Email OTP via backend
-      const otpResponse = await fetch('http://localhost:5000/api/send-otp', {
+      const otpResponse = await fetch(`${API_URL}/api/send-otp`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: formData.adminEmail })
@@ -91,7 +93,7 @@ const AdminActivation = () => {
 
     try {
       // 1. Verify OTP via Backend
-      const otpResponse = await fetch('http://localhost:5000/api/verify-otp', {
+      const otpResponse = await fetch(`${API_URL}/api/verify-otp`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: formData.adminEmail, otp })
@@ -106,7 +108,7 @@ const AdminActivation = () => {
 
       // 3. Burn key + provision tenant via backend (Admin SDK — no Firestore rule issues)
       const keyData = productKeyDoc.data();
-      const activateResponse = await fetch('http://localhost:5000/api/product-keys/activate', {
+      const activateResponse = await fetch(`${API_URL}/api/product-keys/activate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
