@@ -34,6 +34,7 @@ const app = express();
 const ALLOWED_ORIGINS = [
   'http://localhost:5173',  // Vite dev server
   'http://localhost:4173',  // Vite preview
+  'https://nextsolvespms.onrender.com', // Live frontend
   process.env.ALLOWED_ORIGIN, // Production origin from .env
 ].filter(Boolean);
 
