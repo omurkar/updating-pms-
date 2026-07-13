@@ -192,9 +192,11 @@ app.post('/api/send-otp', otpSendLimiter, async (req, res) => {
     const accessTokenResponse = await oauth2Client.getAccessToken();
     const accessToken = accessTokenResponse?.token;
 
-    // 3. Configure Nodemailer with OAuth2
+    // 3. Configure Nodemailer to send via HTTPS (Bypasses Render SMTP block)
     const transporter = nodemailer.createTransport({
-      service: 'gmail',
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
       auth: {
         type: 'OAuth2',
         user: process.env.EMAIL_USER || 'ommurkar34@gmail.com',
@@ -208,19 +210,18 @@ app.post('/api/send-otp', otpSendLimiter, async (req, res) => {
     // 4. Send the Email
     const mailOptions = {
       from: `"PMS Activation" <${process.env.EMAIL_USER || 'ommurkar34@gmail.com'}>`,
-      to: email,
+      to: emailClean,
       subject: 'Your Practical Management System Activation Code',
       html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 600px; border: 1px solid #ddd; border-radius: 8px;">
-          <h2 style="color: #2b6cb0;">Activation Required</h2>
-          <p>Hello,</p>
-          <p>Please use the following 6-digit code to complete your PMS College Admin registration:</p>
-          <div style="background-color: #f7fafc; padding: 16px; text-align: center; font-size: 24px; font-weight: bold; letter-spacing: 4px; color: #2d3748; border-radius: 8px; margin: 20px 0;">
+        <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 600px; border: 1px solid #e0e0e0;">
+          <h2 style="color: #4F46E5;">PMS Account Activation</h2>
+          <p>Use the following One-Time Password (OTP) to complete your college registration. This code is valid for 5 minutes.</p>
+          <div style="background-color: #F3F4F6; padding: 15px; font-size: 24px; font-weight: bold; letter-spacing: 4px; text-align: center; color: #1F2937; margin: 20px 0;">
             ${otp}
           </div>
-          <p style="color: #718096; font-size: 14px;">This code will expire in 5 minutes. Do not share this code with anyone.</p>
+          <p style="font-size: 12px; color: #6B7280;">If you did not request this code, please ignore this email.</p>
         </div>
-      `,
+      `
     };
 
     await transporter.sendMail(mailOptions);
