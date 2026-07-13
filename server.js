@@ -4,13 +4,15 @@ import multer from 'multer';
 import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import nodemailer from 'nodemailer';
+import { Resend } from 'resend';
 import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit'; // SECURITY FIX E-1, H-1
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 
 dotenv.config();
+
+const resend = new Resend(process.env.RESEND_API_KEY || 're_T71EGBMz_9h3BV36UZeTJ1j7LkaGBfgTj');
 
 // ── Firebase Admin SDK (bypasses all Firestore security rules) ──
 if (getApps().length === 0) {
@@ -176,30 +178,8 @@ app.post('/api/send-otp', otpSendLimiter, async (req, res) => {
 
     otpStore.set(emailClean, { otp, expiresAt, attempts: 0 }); // SECURITY: track attempts
 
-    if (!process.env.EMAIL_PASS) {
-      console.log('\n' + '='.repeat(50));
-      console.log('⚠️  EMAIL_PASS not set in .env');
-      console.log(`📧  Mock Email sent to: ${email}`);
-      console.log(`🔑  YOUR OTP CODE IS: ${otp}`);
-      console.log('='.repeat(50) + '\n');
-      return res.json({ message: 'OTP sent successfully (Check server console)' });
-    }
-
-    const transporter = nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 587,
-      secure: false, // This MUST be false when using port 587
-      auth: {
-        user: process.env.EMAIL_USER || 'ommurkar34@gmail.com',
-        pass: process.env.EMAIL_PASS, // App Password
-      },
-      tls: {
-        rejectUnauthorized: false // This helps bypass strict server certificate checks
-      }
-    });
-
-    const mailOptions = {
-      from: `"PMS Activation" <${process.env.EMAIL_USER || 'ommurkar34@gmail.com'}>`,
+    const { data, error } = await resend.emails.send({
+      from: 'onboarding@resend.dev',
       to: email,
       subject: 'Your Practical Management System Activation Code',
       html: `
@@ -213,10 +193,14 @@ app.post('/api/send-otp', otpSendLimiter, async (req, res) => {
           <p style="color: #718096; font-size: 14px;">This code will expire in 5 minutes. Do not share this code with anyone.</p>
         </div>
       `,
-    };
+    });
 
-    await transporter.sendMail(mailOptions);
-    console.log(`📧 OTP sent to ${email}`);
+    if (error) {
+      console.error('🔥 Resend API Error:', error);
+      return res.status(500).json({ error: 'Failed to send OTP email via Resend.' });
+    }
+
+    console.log(`📧 OTP sent to ${email} (ID: ${data.id})`);
     res.json({ message: 'OTP sent successfully' });
   } catch (error) {
     console.error('🔥 Error sending email:', error);
@@ -241,21 +225,8 @@ app.post('/api/send-reminder', reminderLimiter, async (req, res) => {
     .substring(0, 200); // Hard cap on length
 
   try {
-    const transporter = nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 587,
-      secure: false, // This MUST be false when using port 587
-      auth: {
-        user: process.env.EMAIL_USER || 'ommurkar34@gmail.com',
-        pass: process.env.EMAIL_PASS,
-      },
-      tls: {
-        rejectUnauthorized: false // This helps bypass strict server certificate checks
-      }
-    });
-
-    const mailOptions = {
-      from: `"PMS Alerts" <${process.env.EMAIL_USER || 'ommurkar34@gmail.com'}>`,
+    const { data, error } = await resend.emails.send({
+      from: 'onboarding@resend.dev',
       to: email,
       subject: 'Urgent: PMS Subscription Expiring Soon',
       html: `
@@ -268,10 +239,14 @@ app.post('/api/send-reminder', reminderLimiter, async (req, res) => {
           <p style="color: #718096; font-size: 14px;">Regards,<br/>PMS Team</p>
         </div>
       `,
-    };
+    });
 
-    await transporter.sendMail(mailOptions);
-    console.log(`📧 Expiration reminder sent to ${email}`);
+    if (error) {
+      console.error('🔥 Resend API Error:', error);
+      return res.status(500).json({ error: 'Failed to send reminder email via Resend.' });
+    }
+
+    console.log(`📧 Expiration reminder sent to ${email} (ID: ${data.id})`);
     res.json({ message: 'Reminder sent successfully' });
   } catch (error) {
     console.error('🔥 Error sending reminder email:', error);
