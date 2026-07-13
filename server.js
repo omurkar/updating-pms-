@@ -5,6 +5,7 @@ import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
+import { google } from 'googleapis';
 import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit'; // SECURITY FIX E-1, H-1
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
@@ -173,31 +174,38 @@ app.post('/api/send-otp', otpSendLimiter, async (req, res) => {
   try {
     const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digit OTP
     const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes validity
-
     otpStore.set(emailClean, { otp, expiresAt, attempts: 0 }); // SECURITY: track attempts
 
-    if (!process.env.EMAIL_PASS) {
-      console.log('\n' + '='.repeat(50));
-      console.log('⚠️  EMAIL_PASS not set in .env');
-      console.log(`📧  Mock Email sent to: ${email}`);
-      console.log(`🔑  YOUR OTP CODE IS: ${otp}`);
-      console.log('='.repeat(50) + '\n');
-      return res.json({ message: 'OTP sent successfully (Check server console)' });
-    }
+    // 1. Setup OAuth2 Client
+    const OAuth2 = google.auth.OAuth2;
+    const oauth2Client = new OAuth2(
+      process.env.OAUTH_CLIENTID,
+      process.env.OAUTH_CLIENT_SECRET,
+      'https://developers.google.com/oauthplayground'
+    );
 
+    oauth2Client.setCredentials({
+      refresh_token: process.env.OAUTH_REFRESH_TOKEN
+    });
+
+    // 2. Generate temporary Access Token
+    const accessTokenResponse = await oauth2Client.getAccessToken();
+    const accessToken = accessTokenResponse?.token;
+
+    // 3. Configure Nodemailer with OAuth2
     const transporter = nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 587,
-      secure: false, // This MUST be false when using port 587
+      service: 'gmail',
       auth: {
+        type: 'OAuth2',
         user: process.env.EMAIL_USER || 'ommurkar34@gmail.com',
-        pass: process.env.EMAIL_PASS, // App Password
-      },
-      tls: {
-        rejectUnauthorized: false // This helps bypass strict server certificate checks
+        clientId: process.env.OAUTH_CLIENTID,
+        clientSecret: process.env.OAUTH_CLIENT_SECRET,
+        refreshToken: process.env.OAUTH_REFRESH_TOKEN,
+        accessToken: accessToken
       }
     });
 
+    // 4. Send the Email
     const mailOptions = {
       from: `"PMS Activation" <${process.env.EMAIL_USER || 'ommurkar34@gmail.com'}>`,
       to: email,
@@ -218,9 +226,10 @@ app.post('/api/send-otp', otpSendLimiter, async (req, res) => {
     await transporter.sendMail(mailOptions);
     console.log(`📧 OTP sent to ${email}`);
     res.json({ message: 'OTP sent successfully' });
+
   } catch (error) {
     console.error('🔥 Error sending email:', error);
-    res.status(500).json({ error: 'Failed to send OTP email. Make sure App Password is set in .env' });
+    res.status(500).json({ error: 'Failed to send OTP email via OAuth2.' });
   }
 });
 
