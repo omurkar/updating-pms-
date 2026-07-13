@@ -29,9 +29,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.set('trust proxy', 1);
 
 // ── SECURITY FIX: Restrict CORS to known origins instead of wildcard ──
-const ALLOWED_ORIGINS = [
+const allowedOrigins = [
   'http://localhost:5173',  // Vite dev server
   'http://localhost:4173',  // Vite preview
   'https://nextsolvespms.onrender.com', // Live frontend
@@ -39,14 +40,17 @@ const ALLOWED_ORIGINS = [
 ].filter(Boolean);
 
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (e.g., curl, Postman in dev) only in development
-    if (!origin && process.env.NODE_ENV !== 'production') return callback(null, true);
-    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-    callback(new Error(`CORS: Origin '${origin}' not allowed`));
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like Postman or Render health checks)
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('CORS: Origin not allowed'));
+    }
   },
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type', 'x-folder-path'],
+  credentials: true
 }));
 app.use(express.json());
 
@@ -182,7 +186,9 @@ app.post('/api/send-otp', otpSendLimiter, async (req, res) => {
     }
 
     const transporter = nodemailer.createTransport({
-      service: 'gmail',
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true, // true for port 465
       auth: {
         user: process.env.EMAIL_USER || 'ommurkar34@gmail.com',
         pass: process.env.EMAIL_PASS, // App Password
@@ -233,7 +239,9 @@ app.post('/api/send-reminder', reminderLimiter, async (req, res) => {
 
   try {
     const transporter = nodemailer.createTransport({
-      service: 'gmail',
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true, // true for port 465
       auth: {
         user: process.env.EMAIL_USER || 'ommurkar34@gmail.com',
         pass: process.env.EMAIL_PASS,
