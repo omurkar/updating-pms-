@@ -166,19 +166,18 @@ app.post('/api/send-otp', otpSendLimiter, async (req, res) => {
 
   // ── SECURITY FIX E-2: Guard against memory exhaustion ──
   if (otpStore.size >= MAX_OTP_STORE_SIZE) {
-    return res.status(503).json({ error: 'Service temporarily unavailable. Please try again shortly.' });
+    return res.status(503).json({ error: 'Service temporarily unavailable.' });
   }
 
   const emailClean = email.trim().toLowerCase();
 
   try {
-    const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digit OTP
-    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes validity
-    otpStore.set(emailClean, { otp, expiresAt, attempts: 0 }); // SECURITY: track attempts
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 5 * 60 * 1000;
+    otpStore.set(emailClean, { otp, expiresAt, attempts: 0 });
 
-    // 1. Setup OAuth2 Client
-    const OAuth2 = google.auth.OAuth2;
-    const oauth2Client = new OAuth2(
+    // 1. Authenticate with Google OAuth2
+    const oauth2Client = new google.auth.OAuth2(
       process.env.OAUTH_CLIENTID,
       process.env.OAUTH_CLIENT_SECRET,
       'https://developers.google.com/oauthplayground'
@@ -188,49 +187,51 @@ app.post('/api/send-otp', otpSendLimiter, async (req, res) => {
       refresh_token: process.env.OAUTH_REFRESH_TOKEN
     });
 
-    // 2. Generate temporary Access Token
-    const accessTokenResponse = await oauth2Client.getAccessToken();
-    const accessToken = accessTokenResponse?.token;
+    // 2. Initialize the Gmail API client (HTTPS - Port 443, never blocked by Render)
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
-    // 3. Configure Nodemailer to send via HTTPS (Bypasses Render SMTP block)
-    const transporter = nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
-      auth: {
-        type: 'OAuth2',
-        user: process.env.EMAIL_USER || 'ommurkar34@gmail.com',
-        clientId: process.env.OAUTH_CLIENTID,
-        clientSecret: process.env.OAUTH_CLIENT_SECRET,
-        refreshToken: process.env.OAUTH_REFRESH_TOKEN,
-        accessToken: accessToken
-      }
+    // 3. Construct the email raw string (RFC 2822 format)
+    const subject = 'Your Practical Management System Activation Code';
+    const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString('base64')}?=`;
+    const messageParts = [
+      `From: "PMS Activation" <${process.env.EMAIL_USER || 'ommurkar34@gmail.com'}>`,
+      `To: ${emailClean}`,
+      'Content-Type: text/html; charset=utf-8',
+      'MIME-Version: 1.0',
+      `Subject: ${utf8Subject}`,
+      '',
+      `<div style="font-family: Arial, sans-serif; padding: 20px; max-width: 600px; border: 1px solid #e0e0e0;">`,
+      `  <h2 style="color: #4F46E5;">PMS Account Activation</h2>`,
+      `  <p>Use the following One-Time Password (OTP) to complete your registration. This code is valid for 5 minutes.</p>`,
+      `  <div style="background-color: #F3F4F6; padding: 15px; font-size: 24px; font-weight: bold; letter-spacing: 4px; text-align: center; color: #1F2937; margin: 20px 0;">`,
+      `    ${otp}`,
+      `  </div>`,
+      `  <p style="font-size: 12px; color: #6B7280;">If you did not request this code, please ignore this email.</p>`,
+      `</div>`
+    ];
+    const message = messageParts.join('\r\n');
+
+    // 4. Encode the message to base64url format
+    const encodedMessage = Buffer.from(message)
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+
+    // 5. Send via Gmail REST API (HTTPS POST — bypasses Render's SMTP firewall)
+    await gmail.users.messages.send({
+      userId: 'me',
+      requestBody: {
+        raw: encodedMessage,
+      },
     });
 
-    // 4. Send the Email
-    const mailOptions = {
-      from: `"PMS Activation" <${process.env.EMAIL_USER || 'ommurkar34@gmail.com'}>`,
-      to: emailClean,
-      subject: 'Your Practical Management System Activation Code',
-      html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 600px; border: 1px solid #e0e0e0;">
-          <h2 style="color: #4F46E5;">PMS Account Activation</h2>
-          <p>Use the following One-Time Password (OTP) to complete your college registration. This code is valid for 5 minutes.</p>
-          <div style="background-color: #F3F4F6; padding: 15px; font-size: 24px; font-weight: bold; letter-spacing: 4px; text-align: center; color: #1F2937; margin: 20px 0;">
-            ${otp}
-          </div>
-          <p style="font-size: 12px; color: #6B7280;">If you did not request this code, please ignore this email.</p>
-        </div>
-      `
-    };
-
-    await transporter.sendMail(mailOptions);
-    console.log(`📧 OTP sent to ${email}`);
+    console.log(`📧 OTP sent successfully via HTTPS to ${emailClean}`);
     res.json({ message: 'OTP sent successfully' });
 
   } catch (error) {
-    console.error('🔥 Error sending email:', error);
-    res.status(500).json({ error: 'Failed to send OTP email via OAuth2.' });
+    console.error('🔥 Gmail API Error:', error);
+    res.status(500).json({ error: 'Failed to send OTP email via HTTPS API.' });
   }
 });
 
