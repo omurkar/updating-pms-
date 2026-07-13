@@ -187,12 +187,15 @@ app.post('/api/send-otp', otpSendLimiter, async (req, res) => {
 
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
-      port: 465,
-      secure: true, // true for port 465
+      port: 587,
+      secure: false, // This MUST be false when using port 587
       auth: {
         user: process.env.EMAIL_USER || 'ommurkar34@gmail.com',
         pass: process.env.EMAIL_PASS, // App Password
       },
+      tls: {
+        rejectUnauthorized: false // This helps bypass strict server certificate checks
+      }
     });
 
     const mailOptions = {
@@ -240,12 +243,15 @@ app.post('/api/send-reminder', reminderLimiter, async (req, res) => {
   try {
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
-      port: 465,
-      secure: true, // true for port 465
+      port: 587,
+      secure: false, // This MUST be false when using port 587
       auth: {
         user: process.env.EMAIL_USER || 'ommurkar34@gmail.com',
         pass: process.env.EMAIL_PASS,
       },
+      tls: {
+        rejectUnauthorized: false // This helps bypass strict server certificate checks
+      }
     });
 
     const mailOptions = {
