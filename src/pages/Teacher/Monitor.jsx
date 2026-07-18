@@ -1223,31 +1223,52 @@ const Monitor = () => {
 
                   {isChangingSlip ? (() => {
                     const targetMarks = selectedStudent.assigned_questions?.reduce((sum, q) => sum + (Number(q.marks) || 0), 0) || 0;
+                    const isTwoSubjectMode = examDetails?.subject_count === 2;
                     
                     // Generate combinations
                     const combinations = [];
-                    const generate = (startIndex, currentCombo, currentSum) => {
-                      if (combinations.length >= 50) return; // Limit combinations
-                      if (currentSum === targetMarks) {
-                        // Check if it's the exact same as current slip to avoid showing it
-                        const isSame = currentCombo.length === (selectedStudent.assigned_questions?.length || 0) &&
-                                       currentCombo.every(q => selectedStudent.assigned_questions.find(sq => sq.question_id === q.question_id));
-                        if (!isSame) combinations.push([...currentCombo]);
-                        return;
-                      }
-                      if (currentSum > targetMarks) return;
-                      for (let i = startIndex; i < questionBank.length; i++) {
-                        const q = questionBank[i];
-                        if (currentSum + Number(q.marks) <= targetMarks) {
-                          currentCombo.push(q);
-                          generate(i + 1, currentCombo, currentSum + Number(q.marks));
-                          currentCombo.pop();
-                        }
-                      }
-                    };
-                    if (targetMarks > 0 && questionBank.length > 0) generate(0, [], 0);
 
-                    // Filter combinations
+                    if (isTwoSubjectMode && targetMarks > 0 && questionBank.length > 0) {
+                      // ── A/B MODE: Pair one Subject A with one Subject B ──
+                      const poolA = questionBank.filter(q => q.subject_tag === 'A');
+                      const poolB = questionBank.filter(q => q.subject_tag === 'B');
+                      const currentIds = new Set((selectedStudent.assigned_questions || []).map(q => q.question_id));
+
+                      for (const qA of poolA) {
+                        for (const qB of poolB) {
+                          if (combinations.length >= 50) break;
+                          if (Number(qA.marks) + Number(qB.marks) === targetMarks) {
+                            // Skip if it's the exact same slip
+                            const isSame = currentIds.size === 2 && currentIds.has(qA.question_id) && currentIds.has(qB.question_id);
+                            if (!isSame) combinations.push([qA, qB]); // Strict [A, B] ordering
+                          }
+                        }
+                        if (combinations.length >= 50) break;
+                      }
+                    } else if (targetMarks > 0 && questionBank.length > 0) {
+                      // ── SINGLE-SUBJECT MODE: Original recursive generator ──
+                      const generate = (startIndex, currentCombo, currentSum) => {
+                        if (combinations.length >= 50) return;
+                        if (currentSum === targetMarks) {
+                          const isSame = currentCombo.length === (selectedStudent.assigned_questions?.length || 0) &&
+                                         currentCombo.every(q => selectedStudent.assigned_questions.find(sq => sq.question_id === q.question_id));
+                          if (!isSame) combinations.push([...currentCombo]);
+                          return;
+                        }
+                        if (currentSum > targetMarks) return;
+                        for (let i = startIndex; i < questionBank.length; i++) {
+                          const q = questionBank[i];
+                          if (currentSum + Number(q.marks) <= targetMarks) {
+                            currentCombo.push(q);
+                            generate(i + 1, currentCombo, currentSum + Number(q.marks));
+                            currentCombo.pop();
+                          }
+                        }
+                      };
+                      generate(0, [], 0);
+                    }
+
+                    // Filter combinations by search
                     const filteredCombinations = combinations.filter(combo => {
                       if (!slipSearchQuery.trim()) return true;
                       const q = slipSearchQuery.toLowerCase();
@@ -1268,6 +1289,11 @@ const Monitor = () => {
                                   <div className="flex items-center gap-2">
                                     <span className="bg-white border border-gray-200 text-gray-500 text-xs px-2 py-0.5 rounded">Q{idx + 1}</span>
                                     <span className="text-gray-500 text-xs">({q.marks} marks)</span>
+                                    {isTwoSubjectMode && (
+                                      <span className={`text-xs font-bold px-2 py-0.5 rounded ${idx === 0 ? 'bg-blue-100 text-blue-700' : 'bg-orange-100 text-orange-700'}`}>
+                                        {idx === 0 ? 'Subject A' : 'Subject B'}
+                                      </span>
+                                    )}
                                   </div>
                                 </div>
                               ))}
@@ -1278,9 +1304,14 @@ const Monitor = () => {
                           <div className="w-full">
                             <div className="flex justify-between items-center mb-4 px-1">
                               <h3 className="font-bold text-blue-900 text-lg">Available Combinations</h3>
-                              <span className="bg-blue-100/70 text-blue-700 text-xs font-medium px-3 py-1 rounded">
-                                Target Marks: {targetMarks}
-                              </span>
+                              <div className="flex items-center gap-2">
+                                {isTwoSubjectMode && (
+                                  <span className="bg-purple-100 text-purple-700 text-xs font-bold px-3 py-1 rounded">A/B Mode</span>
+                                )}
+                                <span className="bg-blue-100/70 text-blue-700 text-xs font-medium px-3 py-1 rounded">
+                                  Target Marks: {targetMarks}
+                                </span>
+                              </div>
                             </div>
 
                             <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2">
@@ -1299,13 +1330,21 @@ const Monitor = () => {
                                     {combo.map((q, qIdx) => (
                                       <li key={`combo-${idx}-q${qIdx}`} className="text-sm text-gray-600 leading-relaxed">
                                         {q.topic} <span className="text-gray-400">({q.marks}m)</span>
+                                        {isTwoSubjectMode && (
+                                          <span className={`ml-2 text-xs font-bold px-1.5 py-0.5 rounded ${qIdx === 0 ? 'bg-blue-50 text-blue-600' : 'bg-orange-50 text-orange-600'}`}>
+                                            {qIdx === 0 ? 'Sub A' : 'Sub B'}
+                                          </span>
+                                        )}
                                       </li>
                                     ))}
                                   </ul>
                                 </div>
                               )) : (
                                 <div className="text-center py-8 text-gray-500 bg-white border border-gray-200 rounded-lg">
-                                  No combinations found for {targetMarks} marks.
+                                  {isTwoSubjectMode
+                                    ? `No valid Subject A + Subject B combinations found for ${targetMarks} marks.`
+                                    : `No combinations found for ${targetMarks} marks.`
+                                  }
                                 </div>
                               )}
                             </div>

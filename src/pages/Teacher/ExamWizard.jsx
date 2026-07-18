@@ -40,7 +40,14 @@ const ExamWizard = () => {
   const [studentsFile, setStudentsFile] = useState(null);
   const [students, setStudents] = useState([]); 
   const [questionsFile, setQuestionsFile] = useState(null);
-  const [questions, setQuestions] = useState([]); 
+  const [questions, setQuestions] = useState([]);
+
+  // --- Subject Tagging State ---
+  const [subjectCount, setSubjectCount] = useState(1);
+  const [showSubjectCountModal, setShowSubjectCountModal] = useState(false);
+  const [showTaggingModal, setShowTaggingModal] = useState(false);
+  const [subjectTags, setSubjectTags] = useState({});
+  const [isQuestionBankReady, setIsQuestionBankReady] = useState(false); 
 
   const generateSessionCode = (subject) => {
     let letters = subject.replace(/[^a-zA-Z]/g, '');
@@ -71,6 +78,10 @@ const ExamWizard = () => {
         setJournalMarks(t.journalMarks || '');
         setStudents(t.students || []);
         setQuestions(t.questions || []);
+        // Restore subject tagging from template
+        if (t.subjectCount) setSubjectCount(t.subjectCount);
+        if (t.subjectTags) setSubjectTags(t.subjectTags);
+        if ((t.questions || []).length > 0) setIsQuestionBankReady(true);
     }
   }, [location.state]);
 
@@ -314,6 +325,11 @@ const ExamWizard = () => {
         } else {
             setQuestions(validQuestions);
             alert(`✅ UPLOAD SUCCESS:\n\n• Questions Found: ${validQuestions.length}\n• Diagrams Detected: ${imageCount}`);
+            // Intercept: block Next/Save and show Subject Count modal
+            setIsQuestionBankReady(false);
+            setSubjectTags({});
+            setSubjectCount(1);
+            setShowSubjectCountModal(true);
         }
 
     } catch (error) {
@@ -335,8 +351,41 @@ const ExamWizard = () => {
     return true;
   };
 
-  const generateSlips = (studentsList, questionsList, totalPracticalMarks) => {
+  const generateSlips = (studentsList, questionsList, totalPracticalMarks, examSubjectCount, examSubjectTags) => {
     const slips = {};
+
+    // ── MODE 2: Two-Subject A/B Matching ──
+    if (examSubjectCount === 2) {
+      const poolA = questionsList.filter(q => examSubjectTags[q.question_id] === 'A');
+      const poolB = questionsList.filter(q => examSubjectTags[q.question_id] === 'B');
+
+      // Find all valid (A, B) pairs where marks sum to totalPracticalMarks
+      const validPairs = [];
+      for (const qA of poolA) {
+        for (const qB of poolB) {
+          if (qA.marks + qB.marks === totalPracticalMarks) {
+            validPairs.push([qA, qB]);
+          }
+        }
+      }
+
+      if (validPairs.length === 0) {
+        throw new Error(
+          `No valid Subject A + Subject B combination sums to ${totalPracticalMarks} marks.\n\n` +
+          `Subject A questions (${poolA.length}): marks = [${poolA.map(q => q.marks).join(', ')}]\n` +
+          `Subject B questions (${poolB.length}): marks = [${poolB.map(q => q.marks).join(', ')}]\n\n` +
+          `Please adjust marks or re-tag questions.`
+        );
+      }
+
+      studentsList.forEach((student) => {
+        const randomIndex = Math.floor(Math.random() * validPairs.length);
+        slips[student.roll_no] = [...validPairs[randomIndex]];
+      });
+      return slips;
+    }
+
+    // ── MODE 1: Original single-subject greedy algorithm ──
     studentsList.forEach((student) => {
       const selectedQuestions = [];
       let currentSum = 0;
@@ -364,7 +413,8 @@ const ExamWizard = () => {
             created_at: serverTimestamp(),
             subjectName, labNumber, studentDepartment, studentYear,
             durationHours, durationMinutes, practicalMarks, vivaMarks, journalMarks,
-            students, questions 
+            students, questions,
+            subjectCount, subjectTags
         });
         alert("✅ Template Saved!");
         navigate('/teacher/dashboard');
@@ -415,7 +465,8 @@ const ExamWizard = () => {
         viva_marks: parseInt(vivaMarks || 0),
         journal_marks: parseInt(journalMarks || 0),
         is_active: true,
-        created_at: new Date()
+        created_at: new Date(),
+        subject_count: subjectCount
       });
 
       const questionsRef = collection(db, 'colleges', tenantId, 'questions');
@@ -425,12 +476,13 @@ const ExamWizard = () => {
           question_id: question.question_id,
           topic: question.topic,
           marks: question.marks,
-          image: question.image || "" 
+          image: question.image || "",
+          subject_tag: subjectCount === 2 ? (subjectTags[question.question_id] || null) : null
         });
       }
 
       const totalPracticalMarks = parseInt(practicalMarks);
-      const slips = generateSlips(students, questions, totalPracticalMarks);
+      const slips = generateSlips(students, questions, totalPracticalMarks, subjectCount, subjectTags);
 
       for (const student of students) {
         const studentId = `${cleanSessionCode}_${student.roll_no}`;
@@ -718,7 +770,7 @@ const ExamWizard = () => {
                 )}
                 <div className="flex gap-4">
                   <button onClick={() => setStep(2)} className="flex-1 bg-gray-300 hover:bg-gray-400 text-gray-800 px-4 py-2 rounded-lg">Back</button>
-                  <button onClick={() => { if(!validatePracticalMarksDistribution(practicalMarks, questions)) return; setStep(4); }} disabled={questions.length === 0} className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg disabled:opacity-50">Next: Save Template</button>
+                  <button onClick={() => { if(!validatePracticalMarksDistribution(practicalMarks, questions)) return; setStep(4); }} disabled={questions.length === 0 || !isQuestionBankReady} className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg disabled:opacity-50">Next: Save Template</button>
                 </div>
               </div>
             </div>
@@ -960,6 +1012,164 @@ const ExamWizard = () => {
               to   { opacity: 1; transform: scale(1) translateY(0); }
             }
           `}</style>
+
+          {/* ==================== SUBJECT COUNT MODAL (Pop-up 1) ==================== */}
+          {showSubjectCountModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-8" style={{ animation: 'viewerIn 0.25s ease-out' }}>
+                <div className="flex justify-between items-start mb-6">
+                  <div>
+                    <h3 className="text-xl font-bold text-gray-900">Subject Configuration</h3>
+                    <p className="text-sm text-gray-500 mt-1">Does this Question Bank contain questions for 1 or 2 subjects?</p>
+                  </div>
+                  <button onClick={() => { setShowSubjectCountModal(false); setIsQuestionBankReady(true); }} className="text-gray-400 hover:text-gray-600 text-xl font-bold leading-none">&times;</button>
+                </div>
+
+                <div className="space-y-3 mb-8">
+                  <label className={`flex items-center gap-4 p-4 rounded-xl border-2 cursor-pointer transition ${
+                    subjectCount === 1 ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300 bg-white'
+                  }`}>
+                    <input type="radio" name="subjectCount" value={1} checked={subjectCount === 1} onChange={() => setSubjectCount(1)} className="w-5 h-5 text-blue-600" />
+                    <div>
+                      <p className="font-bold text-gray-800">1 Subject</p>
+                      <p className="text-xs text-gray-500">All questions belong to a single subject</p>
+                    </div>
+                  </label>
+                  <label className={`flex items-center gap-4 p-4 rounded-xl border-2 cursor-pointer transition ${
+                    subjectCount === 2 ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300 bg-white'
+                  }`}>
+                    <input type="radio" name="subjectCount" value={2} checked={subjectCount === 2} onChange={() => setSubjectCount(2)} className="w-5 h-5 text-blue-600" />
+                    <div>
+                      <p className="font-bold text-gray-800">2 Subjects</p>
+                      <p className="text-xs text-gray-500">You will tag each question as Subject A or Subject B</p>
+                    </div>
+                  </label>
+                </div>
+
+                <button
+                  onClick={() => {
+                    setShowSubjectCountModal(false);
+                    if (subjectCount === 1) {
+                      setIsQuestionBankReady(true);
+                    } else {
+                      // Open tagging modal for 2 subjects
+                      setSubjectTags({});
+                      setShowTaggingModal(true);
+                    }
+                  }}
+                  className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-lg transition shadow-md"
+                >
+                  {subjectCount === 1 ? 'Continue' : 'Next: Tag Questions →'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ==================== QUESTION TAGGING MODAL (Pop-up 2) ==================== */}
+          {showTaggingModal && (
+            <div
+              className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+              style={{ backdropFilter: 'blur(10px)', background: 'rgba(15,23,42,0.6)' }}
+            >
+              <div
+                className="bg-white rounded-3xl shadow-2xl w-full flex flex-col"
+                style={{ maxWidth: '900px', maxHeight: '88vh', animation: 'viewerIn 0.28s cubic-bezier(.16,1,.3,1)' }}
+              >
+                {/* Header */}
+                <div className="flex items-center justify-between px-6 py-4 rounded-t-3xl flex-shrink-0" style={{ background: 'linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%)' }}>
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 bg-white bg-opacity-20 rounded-2xl flex items-center justify-center text-2xl">🏷️</div>
+                    <div>
+                      <h3 className="text-xl font-bold text-white">Tag Questions by Subject</h3>
+                      <p className="text-sm text-white text-opacity-80">
+                        {Object.keys(subjectTags).length} / {questions.length} tagged
+                      </p>
+                    </div>
+                  </div>
+                  <button onClick={() => { setShowTaggingModal(false); setShowSubjectCountModal(true); }} className="w-9 h-9 flex items-center justify-center rounded-xl bg-white bg-opacity-20 hover:bg-opacity-30 text-white transition">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                  </button>
+                </div>
+
+                {/* Stats Bar */}
+                <div className="flex gap-4 px-6 py-3 bg-gray-50 border-b border-gray-100 flex-shrink-0">
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="w-2 h-2 bg-purple-500 rounded-full"></span>
+                    <span className="text-gray-600">Total: <strong className="text-gray-800">{questions.length}</strong></span>
+                  </div>
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="w-2 h-2 bg-blue-500 rounded-full"></span>
+                    <span className="text-gray-600">Subject A: <strong className="text-gray-800">{Object.values(subjectTags).filter(t => t === 'A').length}</strong></span>
+                  </div>
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="w-2 h-2 bg-orange-500 rounded-full"></span>
+                    <span className="text-gray-600">Subject B: <strong className="text-gray-800">{Object.values(subjectTags).filter(t => t === 'B').length}</strong></span>
+                  </div>
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="w-2 h-2 bg-gray-300 rounded-full"></span>
+                    <span className="text-gray-600">Untagged: <strong className="text-gray-800">{questions.length - Object.keys(subjectTags).length}</strong></span>
+                  </div>
+                </div>
+
+                {/* Table Body */}
+                <div className="overflow-auto flex-1">
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 bg-purple-600 text-white">
+                      <tr>
+                        <th className="text-left px-4 py-3 font-semibold w-10">#</th>
+                        <th className="text-left px-4 py-3 font-semibold w-16">ID</th>
+                        <th className="text-left px-4 py-3 font-semibold">Topic / Question</th>
+                        <th className="text-right px-4 py-3 font-semibold w-20">Marks</th>
+                        <th className="text-center px-4 py-3 font-semibold w-48">Subject Allocation</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {questions.map((q, idx) => (
+                        <tr key={q.question_id} className={`border-b border-gray-100 hover:bg-purple-50 transition ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
+                          <td className="px-4 py-3 text-gray-400 text-xs font-mono">{idx + 1}</td>
+                          <td className="px-4 py-3">
+                            <span className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-purple-100 text-purple-700 font-bold text-xs">Q{q.question_id}</span>
+                          </td>
+                          <td className="px-4 py-3 text-gray-800 font-medium leading-snug">{q.topic}</td>
+                          <td className="px-4 py-3 text-right">
+                            <span className="inline-flex items-center justify-center px-2.5 py-1 rounded-full text-xs font-bold bg-purple-100 text-purple-700">{q.marks} pts</span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center justify-center gap-4">
+                              <label className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border-2 cursor-pointer text-xs font-bold transition ${
+                                subjectTags[q.question_id] === 'A' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-500 hover:border-blue-300'
+                              }`}>
+                                <input type="radio" name={`tag-${q.question_id}`} value="A" checked={subjectTags[q.question_id] === 'A'} onChange={() => setSubjectTags(prev => ({ ...prev, [q.question_id]: 'A' }))} className="w-3.5 h-3.5 text-blue-600" />
+                                Sub A
+                              </label>
+                              <label className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border-2 cursor-pointer text-xs font-bold transition ${
+                                subjectTags[q.question_id] === 'B' ? 'border-orange-500 bg-orange-50 text-orange-700' : 'border-gray-200 text-gray-500 hover:border-orange-300'
+                              }`}>
+                                <input type="radio" name={`tag-${q.question_id}`} value="B" checked={subjectTags[q.question_id] === 'B'} onChange={() => setSubjectTags(prev => ({ ...prev, [q.question_id]: 'B' }))} className="w-3.5 h-3.5 text-orange-600" />
+                                Sub B
+                              </label>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Footer */}
+                <div className="flex items-center justify-between px-6 py-4 bg-gray-50 border-t border-gray-100 rounded-b-3xl flex-shrink-0">
+                  <button onClick={() => { setShowTaggingModal(false); setShowSubjectCountModal(true); }} className="text-gray-500 hover:text-gray-800 font-medium text-sm">← Back</button>
+                  <button
+                    onClick={() => { setShowTaggingModal(false); setIsQuestionBankReady(true); }}
+                    disabled={Object.keys(subjectTags).length !== questions.length}
+                    className="px-8 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-sm font-bold transition shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    ✅ Confirm Tags ({Object.keys(subjectTags).length}/{questions.length})
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* --- HELP MODAL --- */}
           {showHelpModal && (
