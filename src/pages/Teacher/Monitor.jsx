@@ -27,6 +27,11 @@ const Monitor = () => {
   const [remarkSaveStatus, setRemarkSaveStatus] = useState({});
   const remarkDebounceTimers = useRef({});
 
+  // --- NOTE STATE (debounced auto-save) ---
+  const [noteText, setNoteText] = useState('');
+  const [noteSaveStatus, setNoteSaveStatus] = useState(''); // '' | 'Saving...' | 'Saved' | 'Error'
+  const noteDebounceTimer = useRef(null);
+
   const [examDetails, setExamDetails] = useState(null);
   const [questionBank, setQuestionBank] = useState([]);
   const [isChangingSlip, setIsChangingSlip] = useState(false);
@@ -344,6 +349,18 @@ const Monitor = () => {
     setIsChangingSlip(false);
   };
 
+  // Load note text when a student is selected
+  useEffect(() => {
+    if (selectedStudent) {
+      setNoteText(selectedStudent.teacher_note || '');
+      setNoteSaveStatus('');
+      // Cancel any pending note timer from a previous student
+      if (noteDebounceTimer.current) {
+        clearTimeout(noteDebounceTimer.current);
+      }
+    }
+  }, [selectedStudent?.id]);
+
   const handleQuestionScoreChange = (key, value, maxMarks) => {
     const val = parseInt(value) || 0;
     if (val > maxMarks) { alert(`Marks cannot exceed max marks of ${maxMarks}`); return; }
@@ -380,6 +397,34 @@ const Monitor = () => {
     } catch (error) {
       alert("Error approving question: " + error.message);
     }
+  };
+
+  // ── NOTE: 2-second debounced auto-save ──────────────────────────────────────
+  // Every keystroke resets the 2000ms timer. The Firestore write only fires
+  // after the user has stopped typing for a full 2 seconds.
+  const handleNoteChange = (value) => {
+    setNoteText(value);
+    setNoteSaveStatus('Saving...');
+
+    // Clear the previous pending timer on every keystroke
+    if (noteDebounceTimer.current) {
+      clearTimeout(noteDebounceTimer.current);
+    }
+
+    // Schedule a new write — fires only if no keystroke occurs in the next 2000ms
+    noteDebounceTimer.current = setTimeout(async () => {
+      try {
+        await updateDoc(doc(db, 'colleges', tenantId, 'students', selectedStudent.id), {
+          teacher_note: value
+        });
+        setNoteSaveStatus('Saved');
+        // Auto-clear the 'Saved' indicator after 2 more seconds
+        setTimeout(() => setNoteSaveStatus(''), 2000);
+      } catch (error) {
+        console.error('Note save failed:', error);
+        setNoteSaveStatus('Error');
+      }
+    }, 2000);
   };
 
   const handleSaveAllGrades = async () => {
@@ -1061,49 +1106,85 @@ const Monitor = () => {
 
                   {isChangingSlip ? (
                     <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
-                      <div className="mb-4 bg-white border border-yellow-200 rounded-lg p-4 shadow-sm">
-                        <h4 className="text-sm font-bold text-gray-700 uppercase tracking-wide mb-3 border-b pb-2">Current Slip</h4>
-                        {selectedStudent.assigned_questions?.length > 0 ? (
-                          <div className="space-y-2">
-                            {selectedStudent.assigned_questions.map(q => (
-                              <div key={q.question_id} className="text-sm bg-yellow-50 text-gray-800 px-3 py-2 rounded border border-yellow-200">
-                                <span className="font-semibold block mb-1">{q.topic}</span>
-                                <span className="text-xs text-gray-500 font-mono bg-white px-1 rounded border">Q{q.question_id}</span>
-                                <span className="text-xs text-gray-500 ml-2">({q.marks} marks)</span>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (<p className="text-sm text-gray-500 italic">No questions assigned.</p>)}
+                      <div className="mb-4">
+                        <h3 className="font-bold text-blue-800 text-base mb-3">🔄 Change Individual Slip Questions</h3>
+                        <p className="text-xs text-gray-500 mb-4">Each question below can be swapped independently. Changing one question has no effect on the others.</p>
                       </div>
-                      <div className="flex justify-between items-center mb-3">
-                        <h3 className="font-bold text-blue-800">Available Combinations</h3>
-                        <span className="text-xs text-blue-600 bg-blue-100 px-2 py-1 rounded">Target Marks: {examDetails?.practical_marks}</span>
-                      </div>
-                      <div className="max-h-80 overflow-y-auto bg-white border rounded p-2 mb-4 space-y-2">
-                        {generatedSlips.map((slip, i) => {
-                          const isCurrent = JSON.stringify(slip.map(q => q.question_id).sort()) === JSON.stringify(selectedStudent.assigned_questions?.map(q => q.question_id).sort());
-                          if (isCurrent) return null;
-                          return (
-                            <div key={i} className="flex justify-between items-start p-3 border rounded hover:bg-gray-50 transition group">
-                              <div className="flex-1 pr-4">
-                                <div className="flex items-center gap-2 mb-2">
-                                  <span className="font-bold text-blue-700 text-xs uppercase tracking-wider bg-blue-50 px-2 py-0.5 rounded">Option {i + 1}</span>
+
+                      {/* Per-question granular change UI */}
+                      {selectedStudent.assigned_questions?.length > 0 ? (
+                        <div className="space-y-4">
+                          {selectedStudent.assigned_questions.map((currentQ, slotIndex) => {
+                            // Find all questions that can legally replace this slot:
+                            // same marks value, different question_id, not already assigned to another slot
+                            const otherAssignedIds = new Set(
+                              selectedStudent.assigned_questions
+                                .filter((_, i) => i !== slotIndex)
+                                .map(q => q.question_id)
+                            );
+                            const alternatives = questionBank.filter(
+                              q => q.marks === currentQ.marks && q.question_id !== currentQ.question_id && !otherAssignedIds.has(q.question_id)
+                            );
+
+                            return (
+                              <div key={slotIndex} className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                                {/* Current question header */}
+                                <div className="bg-yellow-50 border-b border-yellow-200 px-4 py-2 flex justify-between items-center">
+                                  <div>
+                                    <span className="text-xs font-bold text-yellow-700 uppercase tracking-wide">Slot {slotIndex + 1} — Current</span>
+                                    <div className="font-semibold text-gray-800 text-sm mt-0.5">{currentQ.topic}</div>
+                                    <span className="text-xs text-gray-500 font-mono">Q{currentQ.question_id} &bull; {currentQ.marks} marks</span>
+                                  </div>
                                 </div>
-                                <ul className="list-disc list-inside space-y-1">
-                                  {slip.map(q => (
-                                    <li key={q.question_id} className="text-sm text-gray-700 leading-snug">
-                                      {q.topic} <span className="text-xs text-gray-400">({q.marks}m)</span>
-                                    </li>
-                                  ))}
-                                </ul>
+
+                                {/* Alternatives for this slot */}
+                                {alternatives.length === 0 ? (
+                                  <div className="px-4 py-3 text-sm text-gray-400 italic">No alternative questions with {currentQ.marks} marks available.</div>
+                                ) : (
+                                  <div className="divide-y divide-gray-100">
+                                    {alternatives.map(altQ => (
+                                      <div key={altQ.question_id} className="flex justify-between items-center px-4 py-2.5 hover:bg-gray-50 transition">
+                                        <div>
+                                          <div className="text-sm text-gray-800">{altQ.topic}</div>
+                                          <span className="text-xs text-gray-400 font-mono">Q{altQ.question_id} &bull; {altQ.marks} marks</span>
+                                        </div>
+                                        <button
+                                          onClick={async () => {
+                                            // Build the new questions array — only replace slot `slotIndex`, leave others untouched
+                                            const newQuestions = selectedStudent.assigned_questions.map((q, i) =>
+                                              i === slotIndex
+                                                ? { question_id: altQ.question_id, topic: altQ.topic, marks: altQ.marks, image: altQ.image || '' }
+                                                : { question_id: q.question_id, topic: q.topic, marks: q.marks, image: q.image || '' }
+                                            );
+                                            try {
+                                              await updateDoc(
+                                                doc(db, 'colleges', tenantId, 'students', selectedStudent.id),
+                                                { assigned_questions: newQuestions, is_slip_changed: true }
+                                              );
+                                              // Update local selectedStudent so the UI reflects the change immediately
+                                              setSelectedStudent(prev => ({ ...prev, assigned_questions: newQuestions, is_slip_changed: true }));
+                                            } catch (err) {
+                                              alert('Failed to change question: ' + err.message);
+                                            }
+                                          }}
+                                          className="ml-4 flex-shrink-0 bg-white border border-blue-600 text-blue-600 hover:bg-blue-600 hover:text-white text-xs font-bold px-3 py-1.5 rounded transition"
+                                        >
+                                          Change
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
-                              <button onClick={() => handleAssignSlip(slip)} className="self-center bg-white border border-blue-600 text-blue-600 hover:bg-blue-600 hover:text-white px-4 py-2 rounded text-sm font-bold transition whitespace-nowrap">Assign</button>
-                            </div>
-                          );
-                        })}
-                      </div>
-                      <div className="flex justify-end">
-                        <button onClick={() => setIsChangingSlip(false)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">Cancel</button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-gray-400 italic">No questions assigned to this student.</p>
+                      )}
+
+                      <div className="flex justify-end mt-4">
+                        <button onClick={() => setIsChangingSlip(false)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 font-medium">Done</button>
                       </div>
                     </div>
                   ) : (
@@ -1224,14 +1305,35 @@ const Monitor = () => {
                           </div>
                         </div>
 
-                        <div className="flex justify-between items-center">
-                          {selectedStudent.status === 'approval_requested' ? (
-                            <div className="flex gap-4">
-                              <button onClick={() => handleReject(selectedStudent.id)} className="bg-red-500 hover:bg-red-600 text-white px-5 py-3 rounded-lg font-bold shadow-lg transition flex items-center gap-2">❌ Reject</button>
-                              <button onClick={() => handleApprove(selectedStudent.id)} className="bg-green-600 hover:bg-green-700 text-white px-5 py-3 rounded-lg font-bold shadow-lg transition flex items-center gap-2">✅ Approve</button>
-                            </div>
-                          ) : <div></div>}
-                          <button onClick={handleSaveAllGrades} className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-lg font-bold shadow-lg transition transform hover:scale-105">💾 Save Grades</button>
+                        <div className="flex justify-between items-center gap-4">
+                          {/* Note textarea — auto-saves with 2s debounce */}
+                          <div className="flex-1">
+                            <label className="block text-gray-400 text-xs font-bold mb-1 uppercase tracking-wide flex items-center gap-2">
+                              Note
+                              {noteSaveStatus && (
+                                <span className={`text-xs px-2 py-0.5 rounded-full font-normal normal-case tracking-normal ${
+                                  noteSaveStatus === 'Saved' ? 'bg-green-700 text-green-200'
+                                  : noteSaveStatus === 'Error' ? 'bg-red-700 text-red-200'
+                                  : 'bg-gray-600 text-gray-300'
+                                }`}>
+                                  {noteSaveStatus === 'Saving...' ? (
+                                    <span className="flex items-center gap-1">
+                                      <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                      Saving...
+                                    </span>
+                                  ) : noteSaveStatus === 'Saved' ? '✅ Saved' : '⚠️ Error'}
+                                </span>
+                              )}
+                            </label>
+                            <textarea
+                              value={noteText}
+                              onChange={(e) => handleNoteChange(e.target.value)}
+                              placeholder="Add a private note for this student..."
+                              className="w-full bg-gray-700 border border-gray-600 text-white rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none placeholder-gray-400"
+                              rows={2}
+                            />
+                          </div>
+                          <button onClick={handleSaveAllGrades} className="flex-shrink-0 bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-lg font-bold shadow-lg transition transform hover:scale-105 self-end">💾 Save Grades</button>
                         </div>
                       </div>
                     </div>
