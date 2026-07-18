@@ -9,7 +9,7 @@ const StatusBadge = ({ status }) => {
 
   const statusLabels = {
     registered: 'Registered',
-    in_progress: 'In Progress',
+    in_progress: 'Joined',
     approval_requested: 'Pending Approval',
     approved: 'Approved',
     submitted: 'Submitted'

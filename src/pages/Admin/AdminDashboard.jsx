@@ -5,6 +5,7 @@ import { initializeApp } from 'firebase/app';
 import * as XLSX from 'xlsx';
 import { db, firebaseConfig } from '../../firebase';
 import Navbar from '../../components/Navbar';
+import GetHelpModal from '../../components/GetHelpModal';
 import ProtectedRoute from '../../components/ProtectedRoute';
 import { useTenant } from '../../context/TenantContext';
 
@@ -61,6 +62,7 @@ const AdminDashboard = () => {
   // --- SETTINGS DROPDOWN STATE ---
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const settingsDropdownRef = useRef(null);
+  const [isHelpModalOpen, setIsHelpModalOpen] = useState(false);
 
   // --- SECONDARY ADMIN MODAL STATE ---
   const [showSecondAdminModal, setShowSecondAdminModal] = useState(false);
@@ -918,7 +920,7 @@ const AdminDashboard = () => {
                       id="settings-get-help-btn"
                       onClick={() => {
                         setShowSettingsDropdown(false);
-                        window.open('mailto:ommurkar34@gmail.com?subject=PMS Help Request', '_blank');
+                        setIsHelpModalOpen(true);
                       }}
                       className="w-full text-left px-4 py-3 hover:bg-gray-50 transition flex items-center gap-3 group border-t border-gray-100"
                     >
@@ -1622,6 +1624,7 @@ const AdminDashboard = () => {
           )}
 
         </div>
+        <GetHelpModal isOpen={isHelpModalOpen} onClose={() => setIsHelpModalOpen(false)} />
       </div>
     </ProtectedRoute>
   );

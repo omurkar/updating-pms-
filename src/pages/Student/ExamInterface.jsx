@@ -1,8 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { doc, getDoc, onSnapshot, updateDoc, runTransaction } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+import { ref, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage';
 import { db, storage } from '../../firebase';
+import { jsPDF } from 'jspdf';
+import Modal, { useModal } from '../../components/Modal';
 
 const ExamInterface = () => {
   const [searchParams] = useSearchParams();
@@ -22,6 +24,21 @@ const ExamInterface = () => {
   const [zoomedImage, setZoomedImage] = useState(null);
   const [collegeName, setCollegeName] = useState('');
 
+  // ── Feature 1: Upload progress state ──
+  const [uploadProgress, setUploadProgress] = useState({}); // { [idx]: { percent, eta, startTime } }
+
+  // ── Feature 3: Auto-save state ──
+  const [autoSaveStatus, setAutoSaveStatus] = useState(''); // '' | 'saving' | 'saved' | 'error'
+  const lastSavedAnswersRef = useRef(null);
+  const autoSaveTimerRef = useRef(null);
+  const isAutoSavingRef = useRef(false);
+
+  // ── Feature 4: Previous status tracking for rejection detection ──
+  const prevStatusRef = useRef(null);
+
+  // ── Feature 2: Modal hook ──
+  const { modalProps, showAlert, showConfirm } = useModal();
+
   useEffect(() => {
     if (!sessionCode || !rollNo || !tenantId) { navigate('/student/login'); return; }
 
@@ -30,24 +47,67 @@ const ExamInterface = () => {
       if (snapshot.exists()) {
         const data = snapshot.data();
         setExamConfig(data);
-        if (data.is_active === false) { alert("⚠️ Session ENDED globally."); navigate('/student/login'); }
+        if (data.is_active === false) { showAlert('Session Ended', '⚠️ This exam session has ended globally.', 'warning').then(() => navigate('/student/login')); }
         if (data.is_active && data.started_at && data.duration_minutes) {
           const endTime = new Date(data.started_at.toDate().getTime() + data.duration_minutes * 60000);
           const timerInterval = setInterval(() => { setTimeRemaining(endTime - new Date()); }, 1000);
           return () => clearInterval(timerInterval);
         }
-      } else { alert("Session invalid."); navigate('/student/login'); }
+      } else { showAlert('Invalid Session', 'This session does not exist.', 'error').then(() => navigate('/student/login')); }
     });
 
     const studentRef = doc(db, 'colleges', tenantId, 'students', `${sessionCode}_${rollNo}`);
     const unsubscribeStudent = onSnapshot(studentRef, async (snapshot) => {
       if (snapshot.exists()) {
         const data = snapshot.data();
+
+        // ── Feature 4: Detect rejection (approval_requested → in_progress) ──
+        if (prevStatusRef.current === 'approval_requested' && data.status === 'in_progress') {
+          showAlert(
+            'Submission Rejected',
+            'The teacher has rejected your submission. Please make the necessary changes.',
+            'error'
+          );
+        }
+        prevStatusRef.current = data.status;
+
         if ((data.status === 'submitted' || data.status === 'absent' || data.session_ended) && !isSubmitting) {
-            if (student?.status !== 'submitted') { alert("Session ended for you."); navigate('/student/login'); return; }
+            if (student?.status !== 'submitted') { showAlert('Session Ended', 'Your session has ended.', 'warning').then(() => navigate('/student/login')); return; }
         }
         setStudent({ id: snapshot.id, ...data });
-        setAnswers(data.answers || {});
+
+        // ── BUG 1 FIX: Always sync teacher-controlled fields (is_approved, is_rejected)
+        // from the DB snapshot, but never let a DB snapshot overwrite the student's
+        // in-progress typing (code field). We do a targeted merge.
+        setAnswers(prev => {
+          const dbAnswers = data.answers || {};
+
+          if (data.is_slip_changed) {
+            // Acknowledge the slip change: use the DB answers strictly, ignoring local unsaved code.
+            // Also update the DB to clear this flag so we can resume normal local-code prioritization.
+            updateDoc(studentRef, { is_slip_changed: false }).catch(console.error);
+            lastSavedAnswersRef.current = JSON.stringify(dbAnswers);
+            return dbAnswers;
+          }
+
+          const merged = { ...prev };
+          Object.keys(dbAnswers).forEach(qKey => {
+            merged[qKey] = {
+              ...prev[qKey],           // keep local edits (code, file refs)
+              ...dbAnswers[qKey],      // apply all DB fields
+              // But restore local code if student has unsaved typing
+              code: (prev[qKey]?.code !== undefined && lastSavedAnswersRef.current !== null)
+                ? prev[qKey].code
+                : (dbAnswers[qKey]?.code || ''),
+            };
+          });
+          return merged;
+        });
+
+        // Initialize the last-saved ref on first load so auto-save doesn't fire immediately
+        if (lastSavedAnswersRef.current === null) {
+          lastSavedAnswersRef.current = JSON.stringify(data.answers || {});
+        }
         if (data.status === 'registered') try { await updateDoc(studentRef, { status: 'in_progress' }); } catch (e) { console.error(e); }
       } else { navigate('/student/login'); }
     });
@@ -67,12 +127,88 @@ const ExamInterface = () => {
     return () => { unsubscribeExam(); unsubscribeStudent(); };
   }, [sessionCode, rollNo, tenantId, navigate]); 
 
+  // ── Feature 3: Auto-save every 1 second ──
+  useEffect(() => {
+    if (!student || !tenantId || !sessionCode || !rollNo) return;
+
+    const isLocked = ['approval_requested', 'submitted'].includes(student.status) || student.session_ended;
+    if (isLocked) return; // Don't auto-save when locked
+
+    autoSaveTimerRef.current = setInterval(async () => {
+      if (isAutoSavingRef.current) return; // Skip if already saving
+
+      const currentJson = JSON.stringify(answers);
+      if (currentJson === lastSavedAnswersRef.current) return; // Nothing changed
+
+      isAutoSavingRef.current = true;
+      setAutoSaveStatus('saving');
+
+      try {
+        const studentRef = doc(db, 'colleges', tenantId, 'students', `${sessionCode}_${rollNo}`);
+
+        // ── BUG 1 FIX: Use dot-notation field updates instead of overwriting the
+        // entire `answers` map. This preserves server-side fields like `is_approved`
+        // and `is_rejected` that are written by the teacher and never tracked locally.
+        const dotNotationUpdate = {};
+        const prev = JSON.parse(lastSavedAnswersRef.current || '{}');
+        Object.entries(answers).forEach(([qKey, qVal]) => {
+          const prevVal = prev[qKey] || {};
+          // Only write the student-editable fields, never touch is_approved/is_rejected
+          if (qVal.code !== prevVal.code) dotNotationUpdate[`answers.${qKey}.code`] = qVal.code || '';
+          if (qVal.file_uploaded !== prevVal.file_uploaded) dotNotationUpdate[`answers.${qKey}.file_uploaded`] = qVal.file_uploaded || false;
+          if (qVal.file_name !== prevVal.file_name) dotNotationUpdate[`answers.${qKey}.file_name`] = qVal.file_name || null;
+          if (qVal.file_url !== prevVal.file_url) dotNotationUpdate[`answers.${qKey}.file_url`] = qVal.file_url || null;
+          if (qVal.storage_ref !== prevVal.storage_ref) dotNotationUpdate[`answers.${qKey}.storage_ref`] = qVal.storage_ref || null;
+        });
+
+        if (Object.keys(dotNotationUpdate).length > 0) {
+          await updateDoc(studentRef, dotNotationUpdate);
+        }
+
+        // Also auto-save code files to Firebase Storage
+        if (student.assigned_questions) {
+          const codePromises = [];
+          student.assigned_questions.forEach((_, index) => {
+            const code = answers[`q${index + 1}`]?.code;
+            if (code?.trim()) {
+              const refPtr = ref(storage, `exam_uploads/${sessionCode}/${rollNo}/${sessionCode}_${rollNo}_q${index + 1}_code.txt`);
+              codePromises.push(uploadBytesResumable(refPtr, new Blob([code], { type: 'text/plain' })));
+            }
+          });
+          await Promise.all(codePromises);
+        }
+
+        lastSavedAnswersRef.current = currentJson;
+        setAutoSaveStatus('saved');
+        // Reset status after 2 seconds
+        setTimeout(() => setAutoSaveStatus((prev) => prev === 'saved' ? '' : prev), 2000);
+      } catch (e) {
+        console.error('Auto-save error:', e);
+        setAutoSaveStatus('error');
+        setTimeout(() => setAutoSaveStatus((prev) => prev === 'error' ? '' : prev), 3000);
+      } finally {
+        isAutoSavingRef.current = false;
+      }
+    }, 1000);
+
+    return () => { if (autoSaveTimerRef.current) clearInterval(autoSaveTimerRef.current); };
+  }, [student, answers, tenantId, sessionCode, rollNo]);
+
   const formatTime = (ms) => {
     if (ms === null) return "--:--:--";
     const seconds = Math.floor((Math.abs(ms) / 1000) % 60);
     const minutes = Math.floor((Math.abs(ms) / (1000 * 60)) % 60);
     const hours = Math.floor((Math.abs(ms) / (1000 * 60 * 60)));
     return `${ms < 0 ? '-' : ''}${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  };
+
+  const formatEta = (seconds) => {
+    if (seconds === null || seconds === Infinity || isNaN(seconds)) return '';
+    if (seconds < 1) return '< 1s';
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    if (m > 0) return `~${m}m ${s}s remaining`;
+    return `~${s}s remaining`;
   };
 
   const handleCodeChange = (idx, code) => { setAnswers(prev => ({ ...prev, [`q${idx+1}`]: { ...prev[`q${idx+1}`], code } })); };
@@ -85,28 +221,135 @@ const ExamInterface = () => {
       const code = answers[`q${index+1}`]?.code;
       if (code?.trim()) {
         const refPtr = ref(storage, `exam_uploads/${sessionCode}/${rollNo}/${sessionCode}_${rollNo}_q${index+1}_code.txt`);
-        promises.push(uploadBytes(refPtr, new Blob([code], { type: 'text/plain' })));
+        promises.push(uploadBytesResumable(refPtr, new Blob([code], { type: 'text/plain' })));
       }
     });
     await Promise.all(promises);
   };
 
+  // ── Feature 6: Convert image (JPG/PNG) to single-page PDF blob ──
+  const convertImageToPdf = useCallback((file) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          try {
+            // Determine orientation based on image dimensions
+            const isLandscape = img.width > img.height;
+            const pdfDoc = new jsPDF({
+              orientation: isLandscape ? 'landscape' : 'portrait',
+              unit: 'px',
+              format: [img.width, img.height],
+            });
+            pdfDoc.addImage(e.target.result, file.type === 'image/png' ? 'PNG' : 'JPEG', 0, 0, img.width, img.height);
+            const pdfBlob = pdfDoc.output('blob');
+            resolve(pdfBlob);
+          } catch (err) {
+            reject(err);
+          }
+        };
+        img.onerror = () => reject(new Error('Failed to load image'));
+        img.src = e.target.result;
+      };
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    });
+  }, []);
+
+  // ── Feature 1 + 5 + 6: File upload with progress, relaxed validation, image conversion ──
   const handleFileUpload = async (idx, file) => {
-    if (!file || file.type !== 'application/pdf') { alert("PDF only."); return; }
+    if (!file) return;
+
+    const allowedTypes = ['application/pdf', 'image/jpeg', 'image/png'];
+    if (!allowedTypes.includes(file.type)) {
+      await showAlert('Invalid File', 'Please upload a PDF, JPG, or PNG file.', 'error');
+      return;
+    }
+
     setUploadingQuestions(prev => ({ ...prev, [idx]: true }));
     const key = `q${idx+1}`;
+
     try {
+      // Delete previous file if exists
       if (answers[key]?.storage_ref) try { await deleteObject(ref(storage, answers[key].storage_ref)); } catch(e){}
-      const path = `exam_uploads/${sessionCode}/${rollNo}/q${idx+1}_${file.name.replace(/[^a-zA-Z0-9.\-_]/g, "_")}`;
-      const snap = await uploadBytes(ref(storage, path), file);
-      const url = await getDownloadURL(snap.ref);
-      setAnswers(prev => ({ ...prev, [key]: { ...prev[key], file_uploaded: true, file_name: file.name, file_url: url, storage_ref: path } }));
-    } catch (e) { alert("Upload Failed: " + e.message); } 
-    finally { setUploadingQuestions(prev => { const n = {...prev}; delete n[idx]; return n; }); }
+
+      // ── Feature 6: Convert image to PDF if needed ──
+      let uploadFile = file;
+      let displayName = file.name;
+      const isImage = file.type === 'image/jpeg' || file.type === 'image/png';
+      if (isImage) {
+        const pdfBlob = await convertImageToPdf(file);
+        const pdfFileName = file.name.replace(/\.(jpg|jpeg|png)$/i, '.pdf');
+        uploadFile = new File([pdfBlob], pdfFileName, { type: 'application/pdf' });
+        displayName = `${file.name} (converted to PDF)`;
+      }
+
+      const safeName = uploadFile.name.replace(/[^a-zA-Z0-9.\-_]/g, "_");
+      const path = `exam_uploads/${sessionCode}/${rollNo}/q${idx+1}_${safeName}`;
+      const storageRef = ref(storage, path);
+
+      // ── Feature 1: Use uploadBytesResumable for progress tracking ──
+      const uploadTask = uploadBytesResumable(storageRef, uploadFile);
+      const startTime = Date.now();
+
+      await new Promise((resolve, reject) => {
+        uploadTask.on('state_changed',
+          (snapshot) => {
+            const percent = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100);
+            const elapsed = (Date.now() - startTime) / 1000; // seconds
+            const rate = snapshot.bytesTransferred / elapsed; // bytes per second
+            const remaining = snapshot.totalBytes - snapshot.bytesTransferred;
+            const eta = rate > 0 ? remaining / rate : null;
+
+            setUploadProgress(prev => ({
+              ...prev,
+              [idx]: { percent, eta, startTime }
+            }));
+          },
+          (error) => {
+            reject(error);
+          },
+          () => {
+            resolve(uploadTask.snapshot);
+          }
+        );
+      });
+
+      const url = await getDownloadURL(uploadTask.snapshot.ref);
+      setAnswers(prev => ({ ...prev, [key]: { ...prev[key], file_uploaded: true, file_name: displayName, file_url: url, storage_ref: path } }));
+
+    } catch (e) {
+      await showAlert('Upload Failed', e.message, 'error');
+    } finally {
+      setUploadingQuestions(prev => { const n = {...prev}; delete n[idx]; return n; });
+      setUploadProgress(prev => { const n = {...prev}; delete n[idx]; return n; });
+    }
   };
 
+  // ── Feature 6: Handle paste events for image pasting ──
+  const handlePaste = useCallback(async (idx, e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    for (const item of items) {
+      if (item.type === 'image/png' || item.type === 'image/jpeg') {
+        e.preventDefault();
+        const blob = item.getAsFile();
+        if (blob) {
+          const extension = item.type === 'image/png' ? 'png' : 'jpg';
+          const fileName = `pasted_image_q${idx + 1}.${extension}`;
+          const file = new File([blob], fileName, { type: item.type });
+          await handleFileUpload(idx, file);
+        }
+        return;
+      }
+    }
+  }, [handleFileUpload]);
+
   const handleRemoveFile = async (idx) => {
-    if(!window.confirm("Remove file?")) return;
+    const confirmed = await showConfirm('Remove File', 'Are you sure you want to remove this uploaded file?', 'warning', 'Remove', 'Keep');
+    if (!confirmed) return;
     const key = `q${idx+1}`;
     if (answers[key]?.storage_ref) try { await deleteObject(ref(storage, answers[key].storage_ref)); } catch(e){}
     setAnswers(prev => ({ ...prev, [key]: { ...prev[key], file_uploaded: false, file_name: null, file_url: null, storage_ref: null } }));
@@ -114,7 +357,10 @@ const ExamInterface = () => {
 
   const handleAction = async (status) => {
     if (isSubmitting) return; // SECURITY FIX I-2: Guard against double-click
-    if (status === 'submitted' && !window.confirm('Final Submit?')) return;
+    if (status === 'submitted') {
+      const confirmed = await showConfirm('Final Submit', 'Are you sure you want to submit? This action cannot be undone.', 'warning', 'Submit', 'Cancel');
+      if (!confirmed) return;
+    }
     try {
       setIsSubmitting(true);
       await saveCodeToFiles();
@@ -124,24 +370,46 @@ const ExamInterface = () => {
       if (status === 'submitted') {
         // ── SECURITY FIX I-2: Use runTransaction for final submission ──
         // Atomically verifies the student hasn't already submitted before writing.
-        // Prevents double-submission from double-click, network retry, or tab duplication.
         await runTransaction(db, async (transaction) => {
           const freshDoc = await transaction.get(studentRef);
           if (!freshDoc.exists()) throw new Error('Student session not found.');
           if (freshDoc.data().status === 'submitted') {
             throw new Error('Your exam has already been submitted.');
           }
-          transaction.update(studentRef, { status: 'submitted', answers, submittedAt: new Date().toISOString() });
+          // ── BUG 1 FIX: Use dot-notation to write only student-owned answer fields,
+          // preserving teacher flags (is_approved, is_rejected) written by the teacher.
+          const dotUpdate = { status: 'submitted', submittedAt: new Date().toISOString() };
+          Object.entries(answers).forEach(([qKey, qVal]) => {
+            dotUpdate[`answers.${qKey}.code`] = qVal.code || '';
+            dotUpdate[`answers.${qKey}.file_uploaded`] = qVal.file_uploaded || false;
+            dotUpdate[`answers.${qKey}.file_name`] = qVal.file_name || null;
+            dotUpdate[`answers.${qKey}.file_url`] = qVal.file_url || null;
+            dotUpdate[`answers.${qKey}.storage_ref`] = qVal.storage_ref || null;
+          });
+          transaction.update(studentRef, dotUpdate);
         });
-        alert('Submitted!');
+        await showAlert('Submitted!', 'Your exam has been submitted successfully.', 'success');
         navigate('/student/login');
       } else {
-        // Draft saves are idempotent — no transaction needed
-        await updateDoc(studentRef, { status, answers });
-        alert(status === 'in_progress' ? 'Draft Saved!' : 'Approval Requested!');
+        // Draft saves (approval_requested) are idempotent — no transaction needed
+        // ── BUG 1 FIX: Use dot-notation for approval request too.
+        const dotUpdate = { status };
+        Object.entries(answers).forEach(([qKey, qVal]) => {
+          dotUpdate[`answers.${qKey}.code`] = qVal.code || '';
+          dotUpdate[`answers.${qKey}.file_uploaded`] = qVal.file_uploaded || false;
+          dotUpdate[`answers.${qKey}.file_name`] = qVal.file_name || null;
+          dotUpdate[`answers.${qKey}.file_url`] = qVal.file_url || null;
+          dotUpdate[`answers.${qKey}.storage_ref`] = qVal.storage_ref || null;
+        });
+        await updateDoc(studentRef, dotUpdate);
+        await showAlert(
+          status === 'approval_requested' ? 'Approval Requested' : 'Saved',
+          status === 'approval_requested' ? 'Your submission has been sent for teacher approval.' : 'Draft saved successfully!',
+          'success'
+        );
       }
     } catch (e) {
-      alert(e.message);
+      await showAlert('Error', e.message, 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -149,9 +417,47 @@ const ExamInterface = () => {
 
 
   if (!student) return <div className="text-center p-10">Loading...</div>;
-  const isLocked = ['approval_requested','submitted'].includes(student.status) || student.session_ended;
-  const canFinal = student.status === 'approved';
-  const hasFiles = Object.values(answers).some(a => a?.file_uploaded);
+
+  // ── TASK 1 & 2: Granular per-question approval state ──────────────────────
+  // All derived from the answers map which is kept in sync by the onSnapshot
+  // listener above — so any teacher write triggers an instant UI re-render.
+  const numQ = student.assigned_questions?.length || 0;
+
+  // A question is "acted on" if the teacher set is_approved OR is_rejected
+  const allQuestionsApproved = numQ > 0 && student.assigned_questions.every(
+    (_, i) => answers[`q${i + 1}`]?.is_approved === true
+  );
+  const anyQuestionRejected = student.assigned_questions?.some(
+    (_, i) => answers[`q${i + 1}`]?.is_rejected === true
+  );
+  const anyQuestionApproved = student.assigned_questions?.some(
+    (_, i) => answers[`q${i + 1}`]?.is_approved === true
+  );
+
+  // isLocked: disable code/file editing while fully awaiting approval.
+  // But if any question was rejected, the student must be able to edit again.
+  const isLocked = (
+    (student.status === 'approval_requested' && !anyQuestionRejected) ||
+    student.status === 'approved' ||
+    student.status === 'submitted'
+  ) || student.session_ended;
+
+  // Show "Ask for Approval" when:
+  //   • Student is actively editing (not submitted, not fully approved), OR
+  //   • Some questions were rejected (partial retry needed)
+  // Hide it when ALL questions are approved (no more asking needed)
+  const showAskApprovalBtn = (student.status === 'in_progress' || anyQuestionRejected) && 
+    !allQuestionsApproved &&
+    student.status !== 'submitted' &&
+    !student.session_ended;
+
+  // Show "Final Submit" whenever at least one question is approved
+  const showFinalSubmitBtn = anyQuestionApproved && student.status !== 'submitted';
+
+  // Show pure "Pending Approval" banner only when waiting with zero decisions yet
+  const showPendingBanner = student.status === 'approval_requested' &&
+    !anyQuestionRejected && !allQuestionsApproved;
+
   const isUploading = Object.keys(uploadingQuestions).length > 0;
 
   return (
@@ -167,6 +473,25 @@ const ExamInterface = () => {
           <span>Practical Exam - {student.session_code}</span>
         </h1>
         <div className="flex items-center gap-4">
+            {/* ── Feature 3: Auto-save status indicator ── */}
+            {autoSaveStatus === 'saving' && (
+              <div className="flex items-center gap-2 text-sm font-medium bg-blue-700 px-3 py-1 rounded animate-save-pulse">
+                <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                Auto-saving...
+              </div>
+            )}
+            {autoSaveStatus === 'saved' && (
+              <div className="flex items-center gap-1.5 text-sm font-medium bg-green-600 px-3 py-1 rounded">
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"/></svg>
+                Saved
+              </div>
+            )}
+            {autoSaveStatus === 'error' && (
+              <div className="flex items-center gap-1.5 text-sm font-medium bg-red-600 px-3 py-1 rounded">
+                ⚠ Save failed
+              </div>
+            )}
+
             {timeRemaining !== null && <div className={`font-mono font-bold text-xl px-4 py-1 rounded ${timeRemaining < 0 ? 'bg-red-600 animate-pulse' : 'bg-blue-800'}`}>⏳ {formatTime(timeRemaining)}</div>}
             <button onClick={handleLogoutClick} className="bg-red-500 hover:bg-red-600 px-4 py-2 rounded font-bold border border-red-400">Logout</button>
         </div>
@@ -199,10 +524,15 @@ const ExamInterface = () => {
                     {student.assigned_questions?.map((q, idx) => {
                     const ans = answers[`q${idx+1}`] || { code: '', file_uploaded: false };
                     const uploading = uploadingQuestions[idx];
+                    const progress = uploadProgress[idx];
                     return (
                         <div key={idx} className="border-2 border-gray-200 rounded-xl p-5 hover:border-blue-300 transition bg-gray-50">
                             <div className="flex justify-between items-start mb-3">
-                                <div className="font-bold text-lg text-blue-900">Question {idx+1}</div>
+                                <div className="flex items-center gap-3">
+                                  <div className="font-bold text-lg text-blue-900">Question {idx+1}</div>
+                                  {ans.is_approved && <span className="bg-green-100 text-green-800 text-xs font-bold px-2 py-1 rounded border border-green-200">✅ Approved</span>}
+                                  {ans.is_rejected && <span className="bg-red-100 text-red-800 text-xs font-bold px-2 py-1 rounded border border-red-200">❌ Rejected — Please redo</span>}
+                                </div>
                                 <span className="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-1 rounded">Max: {q.marks}</span>
                             </div>
                             
@@ -217,19 +547,60 @@ const ExamInterface = () => {
                             
                             <div className="mb-4">
                                 <label className="block text-gray-600 font-bold mb-2 text-sm uppercase">Type Code / Answer:</label>
-                                <textarea value={ans.code||''} onChange={e=>handleCodeChange(idx,e.target.value)} disabled={isLocked} onCopy={e=>e.stopPropagation()} onPaste={e=>e.stopPropagation()} onCut={e=>e.stopPropagation()} className="w-full border border-gray-300 rounded-lg px-4 py-3 h-40 font-mono text-sm focus:ring-2 focus:ring-blue-500" placeholder="// Type here..." />
+                                <textarea
+                                  value={ans.code||''}
+                                  onChange={e=>handleCodeChange(idx,e.target.value)}
+                                  disabled={(isLocked || ans.is_approved) && !ans.is_rejected}
+                                  onCopy={e=>e.stopPropagation()}
+                                  onPaste={(e) => { handlePaste(idx, e); e.stopPropagation(); }}
+                                  onCut={e=>e.stopPropagation()}
+                                  className="w-full border border-gray-300 rounded-lg px-4 py-3 h-40 font-mono text-sm focus:ring-2 focus:ring-blue-500"
+                                  placeholder="// Type here... (You can also paste an image directly!)"
+                                />
                             </div>
                             
                             <div className="bg-white p-4 rounded-lg border border-gray-200">
-                                <label className="block text-gray-600 font-bold mb-2 text-sm uppercase">{ans.file_uploaded ? "✅ File Uploaded" : "Upload Output (PDF)"}</label>
+                                <label className="block text-gray-600 font-bold mb-2 text-sm uppercase">{ans.file_uploaded ? "✅ File Uploaded" : "Upload Output (PDF, JPG, or PNG)"}</label>
                                 <div className="flex items-center gap-4">
-                                    <input type="file" onChange={e=>handleFileUpload(idx,e.target.files[0])} disabled={isLocked||uploading} accept="application/pdf" className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
-                                    {uploading && <div className="text-blue-600 text-sm font-bold animate-pulse">Uploading...</div>}
+                                    <input
+                                      type="file"
+                                      onChange={e=>handleFileUpload(idx,e.target.files[0])}
+                                      disabled={((isLocked || ans.is_approved) && !ans.is_rejected)||uploading}
+                                      accept="application/pdf,image/jpeg,image/png"
+                                      className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                                    />
                                 </div>
+
+                                {/* ── Feature 1: Upload progress bar ── */}
+                                {uploading && progress && (
+                                  <div className="mt-3">
+                                    <div className="flex justify-between items-center mb-1.5">
+                                      <span className="text-sm font-semibold text-blue-700">{progress.percent}% uploaded</span>
+                                      <span className="text-xs text-gray-500">{formatEta(progress.eta)}</span>
+                                    </div>
+                                    <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden shadow-inner">
+                                      <div
+                                        className="progress-bar-fill h-full rounded-full relative"
+                                        style={{
+                                          width: `${progress.percent}%`,
+                                          background: progress.percent < 100
+                                            ? 'linear-gradient(90deg, #3b82f6 0%, #60a5fa 50%, #3b82f6 100%)'
+                                            : 'linear-gradient(90deg, #22c55e 0%, #4ade80 50%, #22c55e 100%)',
+                                        }}
+                                      >
+                                        <div className="absolute inset-0 progress-bar-shimmer rounded-full" />
+                                      </div>
+                                    </div>
+                                  </div>
+                                )}
+                                {uploading && !progress && (
+                                  <div className="text-blue-600 text-sm font-bold animate-pulse mt-2">Preparing upload...</div>
+                                )}
+
                                 {ans.file_uploaded && !uploading && (
                                 <div className="mt-3 flex justify-between bg-green-50 p-2 rounded border border-green-200">
                                     <span className="text-green-700 text-sm font-medium truncate max-w-[200px]">📄 {ans.file_name}</span>
-                                    {!isLocked && <button onClick={()=>handleRemoveFile(idx)} className="text-xs text-red-600 font-bold border border-red-200 px-2 rounded bg-white">Remove</button>}
+                                    {(!(isLocked || ans.is_approved) || ans.is_rejected) && <button onClick={()=>handleRemoveFile(idx)} className="text-xs text-red-600 font-bold border border-red-200 px-2 rounded bg-white">Remove</button>}
                                 </div>
                                 )}
                             </div>
@@ -239,11 +610,39 @@ const ExamInterface = () => {
                 </div>
                 </div>
 
-                <div className="bg-white rounded-lg shadow-md p-6 flex justify-end gap-4 border-t-2 border-gray-100">
-                    {!isLocked && ( <> <button onClick={()=>handleAction('in_progress')} disabled={isSubmitting||isUploading} className="bg-gray-500 hover:bg-gray-600 text-white px-6 py-3 rounded-lg font-bold">Save Draft</button> <button onClick={()=>handleAction('approval_requested')} disabled={isSubmitting||isUploading||!hasFiles} className="bg-yellow-500 hover:bg-yellow-600 text-white px-6 py-3 rounded-lg font-bold">Request Approval</button> </> )}
-                    {canFinal && <button onClick={()=>handleAction('submitted')} disabled={isSubmitting||isUploading} className="bg-green-600 hover:bg-green-700 text-white px-8 py-3 rounded-lg font-bold shadow-lg">Final Submit</button>}
-                    {student.status === 'submitted' && <div className="bg-green-100 text-green-800 px-6 py-3 rounded-lg font-bold w-full text-center">✅ Submitted</div>}
-                    {student.status === 'approval_requested' && <div className="bg-yellow-100 text-yellow-800 px-6 py-3 rounded-lg font-bold w-full text-center">⏳ Pending Approval</div>}
+                {/* ── TASK 2: Dynamic Action Buttons ── */}
+                <div className="bg-white rounded-lg shadow-md p-6 flex justify-between gap-4 border-t-2 border-gray-100">
+                    {/* LEFT: Ask for Approval — shown when student has work needing review */}
+                    <div>
+                      {showAskApprovalBtn && (
+                        <button
+                          onClick={()=>handleAction('approval_requested')}
+                          disabled={isSubmitting||isUploading}
+                          className="bg-yellow-500 hover:bg-yellow-600 text-white px-6 py-3 rounded-lg font-bold transition disabled:opacity-50"
+                        >
+                          {anyQuestionRejected ? '🔁 Re-submit for Approval' : 'Ask for Approval'}
+                        </button>
+                      )}
+                    </div>
+
+                    {/* RIGHT: Status indicators and Final Submit */}
+                    <div className="flex items-center gap-3">
+                      {showPendingBanner && (
+                        <div className="bg-yellow-100 text-yellow-800 px-6 py-3 rounded-lg font-bold">⏳ Pending Approval</div>
+                      )}
+                      {student.status === 'submitted' && (
+                        <div className="bg-green-100 text-green-800 px-6 py-3 rounded-lg font-bold">✅ Submitted</div>
+                      )}
+                      {showFinalSubmitBtn && (
+                        <button
+                          onClick={()=>handleAction('submitted')}
+                          disabled={isSubmitting||isUploading}
+                          className="bg-green-600 hover:bg-green-700 text-white px-8 py-3 rounded-lg font-bold shadow-lg transition disabled:opacity-50"
+                        >
+                          ✅ Final Submit
+                        </button>
+                      )}
+                    </div>
                 </div>
             </div>
 
@@ -275,6 +674,9 @@ const ExamInterface = () => {
             </div>
         </div>
       )}
+
+      {/* ── Feature 2: Global Modal (rendered once, controlled by useModal hook) ── */}
+      <Modal {...modalProps} />
     </div>
   );
 };

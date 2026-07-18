@@ -35,12 +35,20 @@ const Monitor = () => {
   const [examDetails, setExamDetails] = useState(null);
   const [questionBank, setQuestionBank] = useState([]);
   const [isChangingSlip, setIsChangingSlip] = useState(false);
-  const [generatedSlips, setGeneratedSlips] = useState([]);
+  const [builderQuestions, setBuilderQuestions] = useState([]);
+  const [slotChange, setSlotChange] = useState(null);
+  const [slipSearchQuery, setSlipSearchQuery] = useState('');
 
   const [isEndSessionModalOpen, setIsEndSessionModalOpen] = useState(false);
   const [endSessionStep, setEndSessionStep] = useState(1);
   const [selectedStudentIds, setSelectedStudentIds] = useState([]);
   const [isEnding, setIsEnding] = useState(false);
+
+  // ── Feature 1: Granular Session Resume State ──
+  const [showResumeModal, setShowResumeModal] = useState(false);
+  const [resumeStep, setResumeStep] = useState(1); // 1 = options, 2 = student picker
+  const [resumeSelectedIds, setResumeSelectedIds] = useState([]);
+  const [isResuming, setIsResuming] = useState(false);
 
   const [timeRemaining, setTimeRemaining] = useState(null);
   const [isTimeUpModalOpen, setIsTimeUpModalOpen] = useState(false);
@@ -58,7 +66,6 @@ const Monitor = () => {
   const [showBufferModal, setShowBufferModal] = useState(false);
   const [bufferName, setBufferName] = useState('');
   const [bufferRoll, setBufferRoll] = useState('');
-  const [bufferRemark, setBufferRemark] = useState('');
   const [bufferLoading, setBufferLoading] = useState(false);
   const [bufferError, setBufferError] = useState('');
 
@@ -290,9 +297,15 @@ const Monitor = () => {
     const unsubscribeStudents = onSnapshot(q, (snapshot) => {
       const studentsList = [];
       snapshot.forEach((doc) => { studentsList.push({ id: doc.id, ...doc.data() }); });
-      setStudents(studentsList.sort((a, b) =>
+      const sortedList = studentsList.sort((a, b) =>
         (a.roll_no || '').localeCompare(b.roll_no || '', undefined, { numeric: true })
-      ));
+      );
+      setStudents(sortedList);
+      
+      setSelectedStudent(prev => {
+        if (!prev) return null;
+        return sortedList.find(s => s.id === prev.id) || prev;
+      });
     });
 
     return () => {
@@ -389,13 +402,61 @@ const Monitor = () => {
     }, 2000);
   };
 
+  // ── TASK 1 FIX: Recalculate top-level status after every per-question approve/reject.
+  // This is what makes the student's UI react instantly via the onSnapshot listener.
+  const recalculateStudentStatus = (updatedAnswers, numQuestions) => {
+    const allApproved = Array.from({ length: numQuestions }, (_, i) =>
+      updatedAnswers[`q${i + 1}`]?.is_approved
+    ).every(Boolean);
+    const anyRejected = Array.from({ length: numQuestions }, (_, i) =>
+      updatedAnswers[`q${i + 1}`]?.is_rejected
+    ).some(Boolean);
+
+    if (allApproved) return 'approved';      // → student sees Final Submit only
+    if (anyRejected) return 'in_progress';   // → student goes back to editing
+    return 'approval_requested';             // → still waiting on other questions
+  };
+
   const handleApproveQuestion = async (answerKey, currentStatus) => {
     try {
+      const numQ = selectedStudent.assigned_questions?.length || 0;
+      // Build a snapshot of answers with the toggled value applied
+      const simulatedAnswers = { ...(selectedStudent.answers || {}) };
+      simulatedAnswers[answerKey] = {
+        ...(simulatedAnswers[answerKey] || {}),
+        is_approved: !currentStatus,
+        is_rejected: false,
+      };
+      const newStatus = recalculateStudentStatus(simulatedAnswers, numQ);
+
       await updateDoc(doc(db, 'colleges', tenantId, 'students', selectedStudent.id), {
-        [`answers.${answerKey}.is_approved`]: !currentStatus
+        [`answers.${answerKey}.is_approved`]: !currentStatus,
+        [`answers.${answerKey}.is_rejected`]: false,
+        status: newStatus,
       });
     } catch (error) {
       alert("Error approving question: " + error.message);
+    }
+  };
+
+  const handleRejectQuestion = async (answerKey, currentStatus) => {
+    try {
+      const numQ = selectedStudent.assigned_questions?.length || 0;
+      const simulatedAnswers = { ...(selectedStudent.answers || {}) };
+      simulatedAnswers[answerKey] = {
+        ...(simulatedAnswers[answerKey] || {}),
+        is_rejected: !currentStatus,
+        is_approved: false,
+      };
+      const newStatus = recalculateStudentStatus(simulatedAnswers, numQ);
+
+      await updateDoc(doc(db, 'colleges', tenantId, 'students', selectedStudent.id), {
+        [`answers.${answerKey}.is_rejected`]: !currentStatus,
+        [`answers.${answerKey}.is_approved`]: false,
+        status: newStatus,
+      });
+    } catch (error) {
+      alert("Error rejecting question: " + error.message);
     }
   };
 
@@ -464,47 +525,90 @@ const Monitor = () => {
   };
 
   const handleApprove = async (studentId) => { try { await updateDoc(doc(db, 'colleges', tenantId, 'students', studentId), { status: 'approved' }); setSelectedStudent(null); } catch (error) { alert(error.message); } };
-  const handleReject = async (studentId) => { if (!window.confirm("Reject submission? Student will be able to edit.")) return; try { await updateDoc(doc(db, 'colleges', tenantId, 'students', studentId), { status: 'in_progress' }); alert("Submission Rejected."); setSelectedStudent(null); } catch (error) { alert(error.message); } };
+  const handleReject = async (studentId) => { if (!window.confirm("Reject submission? Student will be able to edit.")) return; try { await updateDoc(doc(db, 'colleges', tenantId, 'students', studentId), { status: 'in_progress', rejection_reason: 'The teacher has rejected your submission. Please make the necessary changes.', rejected_at: new Date().toISOString() }); alert("Submission Rejected."); setSelectedStudent(null); } catch (error) { alert(error.message); } };
   const handleResumeSession = async (studentId) => { if (!window.confirm("Undo 'End Session'?")) return; try { await updateDoc(doc(db, 'colleges', tenantId, 'students', studentId), { session_ended: false }); alert("Session Resumed."); setSelectedStudent(null); } catch (error) { alert(error.message); } };
 
-  // ── GLOBAL SESSION RESUME ─────────────────────────────────────────────
-  // Re-activates an ended exam WITHOUT overwriting any student records.
-  // Takes a snapshot of all student states for audit trail before resuming.
-  const handleResumeGlobalSession = async () => {
-    if (!window.confirm("⚠️ Resume this ended session?\n\nAll existing data (submissions, grades, attendance) will be preserved.")) return;
-    try {
-      // Snapshot all current student states for audit
-      const snapshot = {
-        resumed_at: new Date(),
-        resumed_by: currentUser?.email || 'unknown',
-        student_states: students.map(s => ({
-          id: s.id,
-          roll_no: s.roll_no,
-          name: s.name,
-          status: s.status,
-          is_graded: s.is_graded || false,
-          session_ended: s.session_ended || false,
-          scores: s.scores || {},
-        })),
-      };
+  // ── GLOBAL SESSION RESUME ───────────────────────────────────────────────────
+  const handleOpenResumeModal = () => {
+    setResumeStep(1);
+    setResumeSelectedIds([]);
+    setShowResumeModal(true);
+  };
 
+  // Resume for ALL students — re-opens session and allows absent/registered students to rejoin
+  const handleResumeForAll = async () => {
+    setIsResuming(true);
+    try {
       const batch = writeBatch(db);
       const examRef = doc(db, 'colleges', tenantId, 'exams', sessionCode);
-
-      // 1. Re-activate the exam — ONLY flip is_active, preserve everything else
       batch.update(examRef, { is_active: true });
 
-      // 2. Save the snapshot as a subcollection doc for audit trail
+      // Audit snapshot
       const snapshotRef = doc(db, 'colleges', tenantId, 'exams', sessionCode, 'resume_snapshots', `resume_${Date.now()}`);
-      batch.set(snapshotRef, snapshot);
+      batch.set(snapshotRef, {
+        resumed_at: new Date(),
+        resumed_by: currentUser?.email || 'unknown',
+        scope: 'all',
+        student_states: students.map(s => ({ id: s.id, roll_no: s.roll_no, name: s.name, status: s.status })),
+      });
+
+      // BUG 2 FIX: Reset absent students back to 'registered' so they can log in again.
+      students.forEach(s => {
+        const sRef = doc(db, 'colleges', tenantId, 'students', s.id);
+        if (s.status === 'absent') {
+          batch.update(sRef, { status: 'registered', session_ended: false });
+        } else if (s.session_ended) {
+          batch.update(sRef, { session_ended: false });
+        }
+      });
 
       await batch.commit();
-      alert("✅ Session Resumed!\n\nAll student submissions, grades, and attendance records are preserved.");
+      setShowResumeModal(false);
+      alert('✅ Session Resumed for ALL students!\n\nAbsent students can now log back in.');
     } catch (error) {
-      alert("Failed to resume session: " + error.message);
+      alert('Failed to resume session: ' + error.message);
+    } finally {
+      setIsResuming(false);
     }
   };
 
+  // Resume for SPECIFIC students only
+  const handleResumeForSpecific = async () => {
+    if (resumeSelectedIds.length === 0) return;
+    setIsResuming(true);
+    try {
+      const batch = writeBatch(db);
+      const examRef = doc(db, 'colleges', tenantId, 'exams', sessionCode);
+      batch.update(examRef, { is_active: true });
+
+      const snapshotRef = doc(db, 'colleges', tenantId, 'exams', sessionCode, 'resume_snapshots', `resume_${Date.now()}`);
+      batch.set(snapshotRef, {
+        resumed_at: new Date(),
+        resumed_by: currentUser?.email || 'unknown',
+        scope: 'specific',
+        resumed_student_ids: resumeSelectedIds,
+      });
+
+      // BUG 2 FIX: Reset only selected students' status so they can re-enter.
+      students.forEach(s => {
+        if (!resumeSelectedIds.includes(s.id)) return;
+        const sRef = doc(db, 'colleges', tenantId, 'students', s.id);
+        const updates = { session_ended: false };
+        // If they were marked absent, put them back to registered so login works.
+        if (s.status === 'absent') updates.status = 'registered';
+        batch.update(sRef, updates);
+      });
+
+      await batch.commit();
+      setShowResumeModal(false);
+      setResumeSelectedIds([]);
+      alert(`✅ Session Resumed for ${resumeSelectedIds.length} selected student(s).`);
+    } catch (error) {
+      alert('Failed to resume session: ' + error.message);
+    } finally {
+      setIsResuming(false);
+    }
+  };
 
   // --- LOGIC FIX: Absent students NOT forced to score 0 in DB ---
   const handleEndForAll = async () => {
@@ -608,40 +712,50 @@ const Monitor = () => {
   const allGraded = students.length > 0 && students.every(s => s.is_graded || s.status === 'absent');
   const activeStudentsList = students.filter(s => s.status !== 'submitted' && s.status !== 'approved' && s.status !== 'absent');
 
-  const generateAllValidSlips = (targetMarks) => {
-    if (!targetMarks || questionBank.length === 0) return [];
-    const validCombos = [];
-    const findCombos = (startIdx, currentCombo, currentSum) => {
-      if (currentSum === targetMarks) { validCombos.push([...currentCombo]); return; }
-      if (currentSum > targetMarks) return;
-      for (let i = startIdx; i < questionBank.length; i++) {
-        const q = questionBank[i];
-        currentCombo.push(q);
-        findCombos(i + 1, currentCombo, currentSum + q.marks);
-        currentCombo.pop();
-      }
-    };
-    findCombos(0, [], 0);
-    return validCombos;
-  };
-
   const handleOpenSlipChange = () => {
     if (!examDetails?.practical_marks) { alert("Error: Practical marks not defined."); return; }
-    const slips = generateAllValidSlips(examDetails.practical_marks);
-    setGeneratedSlips(slips);
+    setBuilderQuestions([...(selectedStudent.assigned_questions || [])]);
+    setSlotChange(null);
     setIsChangingSlip(true);
   };
 
+  // Feature 2: Assign new slip (combination) to student, with granular data clearing.
   const handleAssignSlip = async (newQuestions) => {
+    if (!newQuestions || newQuestions.length === 0) return;
     try {
-      await updateDoc(doc(db, 'colleges', tenantId, 'students', selectedStudent.id), {
-        assigned_questions: newQuestions.map(q => ({ question_id: q.question_id, topic: q.topic, marks: q.marks, image: q.image || "" })),
-        is_slip_changed: true,
+      const oldQuestions = selectedStudent.assigned_questions || [];
+      const currentAnswers = selectedStudent.answers || {};
+
+      const newFullQuestions = newQuestions.map(q => ({ question_id: q.question_id, topic: q.topic, marks: q.marks, image: q.image || '' }));
+
+      // Preserve data for unchanged questions, clear data for new questions
+      const newAnswers = {};
+      newFullQuestions.forEach((newQ, idx) => {
+        const answerKey = `q${idx + 1}`;
+        const oldIndex = oldQuestions.findIndex(oq => oq.question_id === newQ.question_id);
+        if (oldIndex !== -1) {
+          const oldAnswerKey = `q${oldIndex + 1}`;
+          if (currentAnswers[oldAnswerKey]) newAnswers[answerKey] = { ...currentAnswers[oldAnswerKey] };
+        } else {
+          newAnswers[answerKey] = { code: '', file_uploaded: false, file_name: null, file_url: null, is_approved: false, is_rejected: false };
+        }
       });
-      alert("Slip changed!");
+
+      const updatePayload = {
+        assigned_questions: newFullQuestions,
+        answers: newAnswers,
+        is_slip_changed: true,
+      };
+      if (selectedStudent.status === 'approved' || selectedStudent.status === 'approval_requested') {
+        updatePayload.status = 'in_progress';
+      }
+
+      await updateDoc(doc(db, 'colleges', tenantId, 'students', selectedStudent.id), updatePayload);
+      alert('Slip changed successfully!');
       setIsChangingSlip(false);
-      setSelectedStudent(null);
-    } catch (error) { alert(error.message); }
+    } catch (err) {
+      alert('Failed to assign slip: ' + err.message);
+    }
   };
 
   const handleDownloadSessionFiles = async () => {
@@ -773,7 +887,6 @@ const Monitor = () => {
         answers: {},
         scores: { practical: 0, viva: 0, journal: 0, total: 0 },
         is_buffer_student: true,
-        buffer_remark: bufferRemark.trim(),
         added_at: new Date()
       });
 
@@ -782,7 +895,6 @@ const Monitor = () => {
       batch.set(auditRef, {
         roll_no: rollClean,
         name: nameClean,
-        remark: bufferRemark.trim(),
         added_by: currentUser?.email || 'unknown',
         added_at: new Date()
       });
@@ -792,7 +904,6 @@ const Monitor = () => {
       // Reset & close
       setBufferName('');
       setBufferRoll('');
-      setBufferRemark('');
       setShowBufferModal(false);
       setGearMenuOpen(false);
 
@@ -819,7 +930,7 @@ const Monitor = () => {
                   <div className="flex items-center gap-2 mt-2">
                     <span className="bg-red-100 text-red-800 text-sm font-bold px-2 py-1 rounded border border-red-200 inline-block">🔴 Session Ended</span>
                     <button
-                      onClick={handleResumeGlobalSession}
+                      onClick={handleOpenResumeModal}
                       className="bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold px-3 py-1 rounded-lg shadow-sm transition flex items-center gap-1"
                     >
                       ▶️ Resume Session
@@ -882,7 +993,7 @@ const Monitor = () => {
                         {/* Buffer Student */}
                         <button
                           id="buffer-student-btn"
-                          onClick={() => { setGearMenuOpen(false); setBufferName(''); setBufferRoll(''); setBufferRemark(''); setBufferError(''); setShowBufferModal(true); }}
+                          onClick={() => { setGearMenuOpen(false); setBufferName(''); setBufferRoll(''); setBufferError(''); setShowBufferModal(true); }}
                           className="w-full flex items-center gap-3 px-4 py-3 text-left text-gray-700 hover:bg-orange-50 hover:text-orange-700 transition group border-b border-gray-50"
                         >
                           <span className="w-8 h-8 flex items-center justify-center rounded-lg bg-orange-100 group-hover:bg-orange-200 transition flex-shrink-0">
@@ -951,7 +1062,7 @@ const Monitor = () => {
                     ? 'bg-green-600 text-white border-green-700 shadow-md scale-105'
                     : 'bg-white text-green-700 border-green-300 hover:bg-green-50'
                 }`}
-              >⚪ PRESENT / JOINED</button>
+              >⚪ JOINED</button>
 
               <button
                 onClick={() => setStatusFilter(statusFilter === 'approval_requested' ? null : 'approval_requested')}
@@ -991,7 +1102,7 @@ const Monitor = () => {
             </div>
             {statusFilter !== null && (
               <p className="text-xs text-blue-600 mt-3 font-medium">
-                🔍 Filtered by: <span className="uppercase font-bold">{statusFilter === 'graded' ? 'GRADED' : statusFilter === 'in_progress' ? 'PRESENT / JOINED' : statusFilter === 'approval_requested' ? 'APPROVAL REQ' : statusFilter === 'registered' ? 'NOT JOINED' : statusFilter.toUpperCase()}</span>
+                🔍 Filtered by: <span className="uppercase font-bold">{statusFilter === 'graded' ? 'GRADED' : statusFilter === 'in_progress' ? 'JOINED' : statusFilter === 'approval_requested' ? 'APPROVAL REQ' : statusFilter === 'registered' ? 'NOT JOINED' : statusFilter.toUpperCase()}</span>
                 {' '}— {students.filter(s => {
                   if (statusFilter === 'graded') return s.is_graded;
                   if (statusFilter === 'absent') return s.status === 'absent';
@@ -1050,11 +1161,17 @@ const Monitor = () => {
                     textColor = 'text-yellow-900';
                     statusText = 'APPROVAL REQ';
                   }
+                  // 4.5 APPROVED
+                  else if (student.status === 'approved') {
+                    boxClass = 'border-green-400 bg-green-50 shadow-md';
+                    textColor = 'text-green-900';
+                    statusText = 'APPROVED';
+                  }
                   // 5. PRESENT (JOINED)
                   else if (student.status === 'in_progress') {
                     boxClass = 'border-green-300 bg-white';
                     textColor = 'text-green-800';
-                    statusText = 'PRESENT';
+                    statusText = 'JOINED';
                   }
 
                   return (
@@ -1063,8 +1180,6 @@ const Monitor = () => {
                       <div className="absolute top-0 right-0 flex flex-col items-end">
                         {showScore && <div className="text-white text-xs font-bold px-2 py-1 rounded-bl bg-blue-600">Score: {student.scores?.total || 0}</div>}
                         {student.session_ended && <div className="bg-gray-800 text-white text-xs font-bold px-2 py-1 rounded-bl shadow-sm border-t border-gray-600">ENDED</div>}
-                        {student.is_buffer_student && <div className="bg-amber-500 text-white text-xs font-bold px-2 py-1 rounded-bl shadow-sm">C</div>}
-                        {student.is_slip_changed && <div className="bg-orange-400 text-white text-xs font-bold px-2 py-1 rounded-bl shadow-sm">Slip Changed</div>}
                       </div>
 
                       <div className={`font-bold text-lg ${textColor}`}>{student.name}</div>
@@ -1080,16 +1195,18 @@ const Monitor = () => {
           </div>
 
           {selectedStudent && (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-              <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            // TASK 3: Backdrop click closes the modal
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onClick={() => setSelectedStudent(null)}>
+              <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
                 <div className="p-6">
                   <div className="flex justify-between items-start mb-6 border-b pb-4">
                     <div>
                       <h2 className="text-2xl font-bold">{selectedStudent.name} ({selectedStudent.roll_no})</h2>
                       <div className="mt-2 flex gap-2">
                         <StatusBadge status={selectedStudent.status} />
-                        {selectedStudent.is_slip_changed && <span className="bg-orange-100 text-orange-800 text-xs font-bold px-2 py-1 rounded border border-orange-200">⚠️ Slip Has Been Changed</span>}
-                        {selectedStudent.is_graded && <span className="bg-green-100 text-green-800 text-xs font-bold px-2 py-1 rounded border border-green-200">🎓 Graded</span>}
+                        {selectedStudent.is_slip_changed && <span className="bg-orange-100 text-orange-800 text-xs font-bold px-2 py-1 rounded border border-orange-200 flex items-center gap-1">⚠️ Slip Changed</span>}
+                        {selectedStudent.is_graded && <span className="bg-green-100 text-green-800 text-xs font-bold px-2 py-1 rounded border border-green-200 flex items-center gap-1">🎓 Graded</span>}
+                        {selectedStudent.teacher_note && <span className="bg-purple-100 text-purple-800 text-xs font-bold px-2 py-1 rounded border border-purple-200 flex items-center gap-1">📝 Note Added</span>}
                       </div>
                     </div>
                     <div className="flex gap-2 items-center">
@@ -1104,90 +1221,110 @@ const Monitor = () => {
                     </div>
                   </div>
 
-                  {isChangingSlip ? (
-                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
-                      <div className="mb-4">
-                        <h3 className="font-bold text-blue-800 text-base mb-3">🔄 Change Individual Slip Questions</h3>
-                        <p className="text-xs text-gray-500 mb-4">Each question below can be swapped independently. Changing one question has no effect on the others.</p>
-                      </div>
+                  {isChangingSlip ? (() => {
+                    const targetMarks = selectedStudent.assigned_questions?.reduce((sum, q) => sum + (Number(q.marks) || 0), 0) || 0;
+                    
+                    // Generate combinations
+                    const combinations = [];
+                    const generate = (startIndex, currentCombo, currentSum) => {
+                      if (combinations.length >= 50) return; // Limit combinations
+                      if (currentSum === targetMarks) {
+                        // Check if it's the exact same as current slip to avoid showing it
+                        const isSame = currentCombo.length === (selectedStudent.assigned_questions?.length || 0) &&
+                                       currentCombo.every(q => selectedStudent.assigned_questions.find(sq => sq.question_id === q.question_id));
+                        if (!isSame) combinations.push([...currentCombo]);
+                        return;
+                      }
+                      if (currentSum > targetMarks) return;
+                      for (let i = startIndex; i < questionBank.length; i++) {
+                        const q = questionBank[i];
+                        if (currentSum + Number(q.marks) <= targetMarks) {
+                          currentCombo.push(q);
+                          generate(i + 1, currentCombo, currentSum + Number(q.marks));
+                          currentCombo.pop();
+                        }
+                      }
+                    };
+                    if (targetMarks > 0 && questionBank.length > 0) generate(0, [], 0);
 
-                      {/* Per-question granular change UI */}
-                      {selectedStudent.assigned_questions?.length > 0 ? (
-                        <div className="space-y-4">
-                          {selectedStudent.assigned_questions.map((currentQ, slotIndex) => {
-                            // Find all questions that can legally replace this slot:
-                            // same marks value, different question_id, not already assigned to another slot
-                            const otherAssignedIds = new Set(
-                              selectedStudent.assigned_questions
-                                .filter((_, i) => i !== slotIndex)
-                                .map(q => q.question_id)
-                            );
-                            const alternatives = questionBank.filter(
-                              q => q.marks === currentQ.marks && q.question_id !== currentQ.question_id && !otherAssignedIds.has(q.question_id)
-                            );
+                    // Filter combinations
+                    const filteredCombinations = combinations.filter(combo => {
+                      if (!slipSearchQuery.trim()) return true;
+                      const q = slipSearchQuery.toLowerCase();
+                      return combo.some(question => question.topic?.toLowerCase().includes(q));
+                    });
 
-                            return (
-                              <div key={slotIndex} className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-                                {/* Current question header */}
-                                <div className="bg-yellow-50 border-b border-yellow-200 px-4 py-2 flex justify-between items-center">
-                                  <div>
-                                    <span className="text-xs font-bold text-yellow-700 uppercase tracking-wide">Slot {slotIndex + 1} — Current</span>
-                                    <div className="font-semibold text-gray-800 text-sm mt-0.5">{currentQ.topic}</div>
-                                    <span className="text-xs text-gray-500 font-mono">Q{currentQ.question_id} &bull; {currentQ.marks} marks</span>
+                    return (
+                      <div className="bg-[#f8faff] border border-[#d0def0] rounded-xl p-6 mb-6">
+                        <div className="flex flex-col gap-6">
+                          
+                          {/* Section A: CURRENT SLIP */}
+                          <div className="bg-white border border-[#d0def0] rounded-lg p-5">
+                            <h3 className="font-bold text-slate-700 uppercase text-sm tracking-wide mb-4">CURRENT SLIP</h3>
+                            <div className="space-y-3">
+                              {(selectedStudent.assigned_questions || []).map((q, idx) => (
+                                <div key={`curr-${idx}`} className="bg-[#fefce8] border border-yellow-200 rounded-lg p-4">
+                                  <p className="text-sm text-gray-800 mb-3 leading-relaxed">{q.topic}</p>
+                                  <div className="flex items-center gap-2">
+                                    <span className="bg-white border border-gray-200 text-gray-500 text-xs px-2 py-0.5 rounded">Q{idx + 1}</span>
+                                    <span className="text-gray-500 text-xs">({q.marks} marks)</span>
                                   </div>
                                 </div>
+                              ))}
+                            </div>
+                          </div>
 
-                                {/* Alternatives for this slot */}
-                                {alternatives.length === 0 ? (
-                                  <div className="px-4 py-3 text-sm text-gray-400 italic">No alternative questions with {currentQ.marks} marks available.</div>
-                                ) : (
-                                  <div className="divide-y divide-gray-100">
-                                    {alternatives.map(altQ => (
-                                      <div key={altQ.question_id} className="flex justify-between items-center px-4 py-2.5 hover:bg-gray-50 transition">
-                                        <div>
-                                          <div className="text-sm text-gray-800">{altQ.topic}</div>
-                                          <span className="text-xs text-gray-400 font-mono">Q{altQ.question_id} &bull; {altQ.marks} marks</span>
-                                        </div>
-                                        <button
-                                          onClick={async () => {
-                                            // Build the new questions array — only replace slot `slotIndex`, leave others untouched
-                                            const newQuestions = selectedStudent.assigned_questions.map((q, i) =>
-                                              i === slotIndex
-                                                ? { question_id: altQ.question_id, topic: altQ.topic, marks: altQ.marks, image: altQ.image || '' }
-                                                : { question_id: q.question_id, topic: q.topic, marks: q.marks, image: q.image || '' }
-                                            );
-                                            try {
-                                              await updateDoc(
-                                                doc(db, 'colleges', tenantId, 'students', selectedStudent.id),
-                                                { assigned_questions: newQuestions, is_slip_changed: true }
-                                              );
-                                              // Update local selectedStudent so the UI reflects the change immediately
-                                              setSelectedStudent(prev => ({ ...prev, assigned_questions: newQuestions, is_slip_changed: true }));
-                                            } catch (err) {
-                                              alert('Failed to change question: ' + err.message);
-                                            }
-                                          }}
-                                          className="ml-4 flex-shrink-0 bg-white border border-blue-600 text-blue-600 hover:bg-blue-600 hover:text-white text-xs font-bold px-3 py-1.5 rounded transition"
-                                        >
-                                          Change
-                                        </button>
-                                      </div>
-                                    ))}
+                          {/* Section B: Available Combinations */}
+                          <div className="w-full">
+                            <div className="flex justify-between items-center mb-4 px-1">
+                              <h3 className="font-bold text-blue-900 text-lg">Available Combinations</h3>
+                              <span className="bg-blue-100/70 text-blue-700 text-xs font-medium px-3 py-1 rounded">
+                                Target Marks: {targetMarks}
+                              </span>
+                            </div>
+
+                            <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2">
+                              {filteredCombinations.length > 0 ? filteredCombinations.map((combo, idx) => (
+                                <div key={`combo-${idx}`} className="bg-white border border-gray-200 rounded-lg p-5">
+                                  <div className="flex justify-between items-start mb-2">
+                                    <h4 className="font-bold text-blue-600 text-sm tracking-wide">OPTION {idx + 1}</h4>
+                                    <button 
+                                      onClick={() => handleAssignSlip(combo)}
+                                      className="border border-blue-600 text-blue-700 hover:bg-blue-50 px-5 py-1.5 rounded text-sm font-bold transition flex-shrink-0"
+                                    >
+                                      Assign
+                                    </button>
                                   </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      ) : (
-                        <p className="text-sm text-gray-400 italic">No questions assigned to this student.</p>
-                      )}
+                                  <ul className="list-disc pl-5 space-y-2 mt-2">
+                                    {combo.map((q, qIdx) => (
+                                      <li key={`combo-${idx}-q${qIdx}`} className="text-sm text-gray-600 leading-relaxed">
+                                        {q.topic} <span className="text-gray-400">({q.marks}m)</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )) : (
+                                <div className="text-center py-8 text-gray-500 bg-white border border-gray-200 rounded-lg">
+                                  No combinations found for {targetMarks} marks.
+                                </div>
+                              )}
+                            </div>
+                            
+                            {/* Footer */}
+                            <div className="mt-6 flex justify-end pt-4 border-t border-[#d0def0]">
+                              <button 
+                                onClick={() => { setIsChangingSlip(false); setSlipSearchQuery(''); }} 
+                                className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-6 py-2 rounded text-sm transition"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
 
-                      <div className="flex justify-end mt-4">
-                        <button onClick={() => setIsChangingSlip(false)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 font-medium">Done</button>
+                        </div>
                       </div>
-                    </div>
-                  ) : (
+                    );
+                  })() : (
                     <div className="space-y-6">
                       <div className="flex justify-between items-center">
                         <h3 className="font-bold text-gray-800 text-lg">Student Progress & Evaluation</h3>
@@ -1209,12 +1346,20 @@ const Monitor = () => {
                                 <span className="font-bold text-gray-700">Question {index + 1}</span>
                                 <span className="bg-gray-200 text-gray-700 text-xs px-2 py-1 rounded">Max Marks: {question.marks}</span>
                               </div>
-                              <button 
-                                onClick={() => handleApproveQuestion(answerKey, answer?.is_approved)}
-                                className={`text-xs font-bold px-3 py-1.5 rounded transition shadow-sm border ${answer?.is_approved ? 'bg-green-600 text-white border-green-700 hover:bg-green-700' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'}`}
-                              >
-                                {answer?.is_approved ? '✅ Approved' : 'Approve'}
-                              </button>
+                              <div className="flex gap-2">
+                                <button 
+                                  onClick={() => handleApproveQuestion(answerKey, answer?.is_approved)}
+                                  className={`text-xs font-bold px-3 py-1.5 rounded transition shadow-sm border ${answer?.is_approved ? 'bg-green-600 text-white border-green-700 hover:bg-green-700' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'}`}
+                                >
+                                  {answer?.is_approved ? '✅ Approved' : 'Approve'}
+                                </button>
+                                <button 
+                                  onClick={() => handleRejectQuestion(answerKey, answer?.is_rejected)}
+                                  className={`text-xs font-bold px-3 py-1.5 rounded transition shadow-sm border ${answer?.is_rejected ? 'bg-red-600 text-white border-red-700 hover:bg-red-700' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'}`}
+                                >
+                                  {answer?.is_rejected ? '❌ Rejected' : 'Reject'}
+                                </button>
+                              </div>
                             </div>
 
                             <div className="p-4 space-y-4">
@@ -1251,29 +1396,8 @@ const Monitor = () => {
                               </div>
 
                               {canGradePractical && (
-                                <div className="mt-4 pt-4 border-t border-gray-100 flex flex-col lg:flex-row lg:items-start justify-between gap-6 bg-yellow-50 -mx-4 -mb-4 p-4">
-                                  <div className="flex-1 w-full">
-                                    <label className="font-bold text-gray-700 text-sm flex items-center gap-2 mb-2">
-                                      Remark & Feedback
-                                      {remarkSaveStatus[answerKey] && (
-                                        <span className={`text-xs px-2 py-0.5 rounded-full ${remarkSaveStatus[answerKey] === 'Saved' ? 'bg-green-100 text-green-700' : remarkSaveStatus[answerKey] === 'Error' ? 'bg-red-100 text-red-700' : 'bg-gray-200 text-gray-600'}`}>
-                                          {remarkSaveStatus[answerKey] === 'Saving...' ? (
-                                            <span className="flex items-center gap-1">
-                                              <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Saving
-                                            </span>
-                                          ) : remarkSaveStatus[answerKey] === 'Saved' ? '✅ Saved' : '⚠️ Error'}
-                                        </span>
-                                      )}
-                                    </label>
-                                    <textarea 
-                                      value={questionRemarks[answerKey] || ''}
-                                      onChange={(e) => handleRemarkChange(answerKey, e.target.value)}
-                                      placeholder="Add textual feedback or integer scores here..."
-                                      className="w-full border-2 border-yellow-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-yellow-400 resize-none bg-white"
-                                      rows={2}
-                                    />
-                                  </div>
-                                  <div className="flex items-center gap-3 flex-shrink-0 lg:mt-6">
+                                <div className="mt-4 pt-4 border-t border-gray-100 flex justify-end gap-6 bg-yellow-50 -mx-4 -mb-4 p-4">
+                                  <div className="flex items-center gap-3 flex-shrink-0">
                                     <label className="font-bold text-gray-700">Marks for Q{index + 1}:</label>
                                     <input type="number" min="0" max={question.marks} value={score} onChange={(e) => handleQuestionScoreChange(answerKey, e.target.value, question.marks)} className="w-24 border-2 border-yellow-300 rounded-lg px-3 py-2 text-center font-bold text-lg focus:outline-none focus:border-yellow-500 bg-white" placeholder="0" />
                                     <span className="text-gray-500 text-sm">/ {question.marks}</span>
@@ -1404,6 +1528,93 @@ const Monitor = () => {
             </div>
           )}
 
+          {/* ==================== RESUME SESSION MODAL (Feature 1) ==================== */}
+          {showResumeModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full overflow-hidden">
+                <div className="bg-blue-600 text-white px-6 py-4 flex justify-between items-center">
+                  <h3 className="text-xl font-bold">▶️ Resume Session</h3>
+                  <button onClick={() => setShowResumeModal(false)} className="text-white hover:text-blue-200 font-bold text-lg">✕</button>
+                </div>
+
+                {resumeStep === 1 ? (
+                  <div className="p-8 space-y-4">
+                    <p className="text-gray-600 mb-4 text-sm">Choose who should be allowed to rejoin the session:</p>
+                    <button
+                      onClick={handleResumeForAll}
+                      disabled={isResuming}
+                      className="w-full bg-blue-50 hover:bg-blue-100 border-2 border-blue-200 text-blue-800 p-4 rounded-xl flex items-center gap-4 transition disabled:opacity-50"
+                    >
+                      <span className="text-2xl">🌍</span>
+                      <div className="text-left">
+                        <div className="font-bold text-lg">Resume for All Students</div>
+                        <div className="text-xs text-blue-600">Re-activates session. Absent students can log back in.</div>
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => setResumeStep(2)}
+                      className="w-full bg-green-50 hover:bg-green-100 border-2 border-green-200 text-green-800 p-4 rounded-xl flex items-center gap-4 transition"
+                    >
+                      <span className="text-2xl">🎯</span>
+                      <div className="text-left">
+                        <div className="font-bold text-lg">Resume for Specific Students</div>
+                        <div className="text-xs text-green-600">Select which students are allowed to rejoin.</div>
+                      </div>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex flex-col h-[520px]">
+                    <div className="p-4 bg-gray-50 border-b flex justify-between items-center">
+                      <span className="font-bold text-gray-700">Select Students to Resume:</span>
+                      <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          onChange={(e) => {
+                            if (e.target.checked) setResumeSelectedIds(students.map(s => s.id));
+                            else setResumeSelectedIds([]);
+                          }}
+                          checked={resumeSelectedIds.length === students.length && students.length > 0}
+                          className="w-4 h-4 text-blue-600 rounded"
+                        />
+                        Select All
+                      </label>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 space-y-2">
+                      {students.length === 0 ? (
+                        <div className="text-center text-gray-400 py-10">No students in this session.</div>
+                      ) : (
+                        students.map(s => (
+                          <label key={s.id} className={`flex items-center justify-between p-3 rounded-lg border cursor-pointer transition ${resumeSelectedIds.includes(s.id) ? 'bg-blue-50 border-blue-300' : 'hover:bg-gray-50 border-gray-200'}`}>
+                            <div>
+                              <div className="font-bold text-gray-800">{s.roll_no} — {s.name}</div>
+                              <div className="text-xs text-gray-500 uppercase mt-0.5">{s.status.replace('_', ' ')}</div>
+                            </div>
+                            <input
+                              type="checkbox"
+                              checked={resumeSelectedIds.includes(s.id)}
+                              onChange={() => setResumeSelectedIds(prev => prev.includes(s.id) ? prev.filter(id => id !== s.id) : [...prev, s.id])}
+                              className="w-5 h-5 text-blue-600 rounded focus:ring-blue-500 ml-4"
+                            />
+                          </label>
+                        ))
+                      )}
+                    </div>
+                    <div className="p-4 border-t bg-gray-50 flex justify-between items-center">
+                      <button onClick={() => setResumeStep(1)} className="text-gray-500 hover:text-gray-800 font-medium">← Back</button>
+                      <button
+                        onClick={handleResumeForSpecific}
+                        disabled={resumeSelectedIds.length === 0 || isResuming}
+                        className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-bold disabled:opacity-50 disabled:cursor-not-allowed shadow-md transition"
+                      >
+                        {isResuming ? 'Resuming...' : `Resume for Selected (${resumeSelectedIds.length})`}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {isTimeUpModalOpen && (
             <div className="fixed inset-0 bg-red-900 bg-opacity-90 flex items-center justify-center p-4 z-50">
               <div className="bg-white rounded-lg shadow-2xl max-w-md w-full p-8 text-center border-4 border-red-500">
@@ -1521,19 +1732,7 @@ const Monitor = () => {
                   </div>
                 </div>
 
-                {/* Remark */}
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5">Remark</label>
-                  <textarea
-                    id="buffer-remark-input"
-                    value={bufferRemark}
-                    onChange={e => setBufferRemark(e.target.value)}
-                    placeholder="e.g. Late arrival, medical reason..."
-                    rows={2}
-                    className="w-full border-2 border-gray-200 rounded-xl px-4 py-3 focus:border-orange-400 focus:ring-2 focus:ring-orange-100 outline-none transition text-sm resize-none"
-                    disabled={bufferLoading}
-                  />
-                </div>
+
 
                 {/* Auto-assign info */}
                 <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 flex items-start gap-3">
