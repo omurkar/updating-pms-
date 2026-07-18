@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { collection, getDocs, query, deleteDoc, doc, setDoc, getDoc, updateDoc, writeBatch, where, onSnapshot } from 'firebase/firestore';
 import { getAuth, createUserWithEmailAndPassword, deleteUser, signInWithEmailAndPassword } from 'firebase/auth';
 import { initializeApp } from 'firebase/app';
@@ -58,6 +58,24 @@ const AdminDashboard = () => {
     return getAuth(secondaryApp);
   });
 
+  // --- SETTINGS DROPDOWN STATE ---
+  const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
+  const settingsDropdownRef = useRef(null);
+
+  // --- SECONDARY ADMIN MODAL STATE ---
+  const [showSecondAdminModal, setShowSecondAdminModal] = useState(false);
+  const [secondAdminStep, setSecondAdminStep] = useState(1); // 1=password, 2=otp-sent, 3=otp-verify, 4=set-pw, 5=success
+  const [secondAdminFlowToken, setSecondAdminFlowToken] = useState('');
+  const [secondAdminOtpSentToken, setSecondAdminOtpSentToken] = useState('');
+  const [secondAdminSetPwToken, setSecondAdminSetPwToken] = useState('');
+  const [secondAdminPrimaryPw, setSecondAdminPrimaryPw] = useState('');
+  const [secondAdminOtp, setSecondAdminOtp] = useState('');
+  const [secondAdminNewPw, setSecondAdminNewPw] = useState('');
+  const [secondAdminConfirmPw, setSecondAdminConfirmPw] = useState('');
+  const [secondAdminMaskedEmail, setSecondAdminMaskedEmail] = useState('');
+  const [secondAdminLoading, setSecondAdminLoading] = useState(false);
+  const [secondAdminError, setSecondAdminError] = useState('');
+
   // --- REAL-TIME TENANT SETTINGS LISTENER ---
   // This picks up changes made by the Super Admin (e.g., new faculty emails) automatically
   useEffect(() => {
@@ -76,6 +94,17 @@ const AdminDashboard = () => {
 
     return () => unsubSettings();
   }, [tenantId]);
+
+  // --- CLOSE SETTINGS DROPDOWN ON OUTSIDE CLICK ---
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (settingsDropdownRef.current && !settingsDropdownRef.current.contains(e.target)) {
+        setShowSettingsDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   useEffect(() => {
     const initDashboard = async () => {
@@ -594,11 +623,121 @@ const AdminDashboard = () => {
     }
   };
 
+  // ─── SECONDARY ADMIN SETUP HANDLERS ────────────────────────────────────────
+
+  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+
+  // Step 1: Verify primary admin password
+  const handleSecondAdminStep1 = async () => {
+    if (!secondAdminPrimaryPw) return;
+    setSecondAdminLoading(true);
+    setSecondAdminError('');
+    try {
+      const auth = getAuth();
+      const currentUser = auth.currentUser;
+      if (!currentUser) throw new Error('You are not logged in. Please refresh and try again.');
+
+      const resp = await fetch(`${API_URL}/api/secondary-admin/verify-primary-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ primaryEmail: currentUser.email, primaryPassword: secondAdminPrimaryPw }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Password verification failed.');
+
+      setSecondAdminFlowToken(data.flowToken);
+      setSecondAdminStep(2);
+    } catch (err) {
+      setSecondAdminError(err.message);
+    } finally {
+      setSecondAdminLoading(false);
+    }
+  };
+
+  // Step 2: Send OTP to secondary admin email
+  const handleSecondAdminSendOtp = async () => {
+    setSecondAdminLoading(true);
+    setSecondAdminError('');
+    try {
+      const resp = await fetch(`${API_URL}/api/secondary-admin/send-otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flowToken: secondAdminFlowToken }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to send OTP.');
+
+      setSecondAdminOtpSentToken(data.otpSentToken);
+      setSecondAdminMaskedEmail(data.maskedEmail || '');
+      setSecondAdminOtp('');
+      setSecondAdminStep(3);
+    } catch (err) {
+      setSecondAdminError(err.message);
+    } finally {
+      setSecondAdminLoading(false);
+    }
+  };
+
+  // Step 3: Verify OTP
+  const handleSecondAdminVerifyOtp = async () => {
+    if (secondAdminOtp.length !== 6) return;
+    setSecondAdminLoading(true);
+    setSecondAdminError('');
+    try {
+      const resp = await fetch(`${API_URL}/api/secondary-admin/verify-otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ otpSentToken: secondAdminOtpSentToken, otp: secondAdminOtp }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'OTP verification failed.');
+
+      setSecondAdminSetPwToken(data.setPasswordToken);
+      setSecondAdminStep(4);
+    } catch (err) {
+      setSecondAdminError(err.message);
+    } finally {
+      setSecondAdminLoading(false);
+    }
+  };
+
+  // Step 4: Set new password
+  const handleSecondAdminSetPassword = async () => {
+    if (secondAdminNewPw !== secondAdminConfirmPw) {
+      setSecondAdminError('Passwords do not match.');
+      return;
+    }
+    if (secondAdminNewPw.length < 8) {
+      setSecondAdminError('Password must be at least 8 characters.');
+      return;
+    }
+    setSecondAdminLoading(true);
+    setSecondAdminError('');
+    try {
+      const resp = await fetch(`${API_URL}/api/secondary-admin/set-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ setPasswordToken: secondAdminSetPwToken, newPassword: secondAdminNewPw }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to set password.');
+
+      setSecondAdminStep(5);
+    } catch (err) {
+      setSecondAdminError(err.message);
+    } finally {
+      setSecondAdminLoading(false);
+    }
+  };
+  // ─── END SECONDARY ADMIN HANDLERS ──────────────────────────────────────────
+
   const exportToCSV = (data) => {
     setExportLoading(true);
     try {
       const csvRows = [];
       csvRows.push(['Date', 'Session Code', 'Lab/Room', 'Roll No', 'Name', 'Status', 'Practical Marks', 'Viva Marks', 'Total Marks']);
+
+
 
       data.forEach((sub) => {
         const dateToUse = groupedSessions[sub.session_code]?.date_obj || sub.joined_at;
@@ -721,7 +860,7 @@ const AdminDashboard = () => {
         <div className="container mx-auto px-4 py-8">
           <div className="mb-8 flex justify-between items-center">
             <h1 className="text-3xl font-bold text-gray-800">Admin Dashboard</h1>
-            <div className="flex gap-3">
+            <div className="flex gap-3 items-center">
               <button
                 onClick={handleDownloadExcel}
                 className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition flex items-center gap-2"
@@ -731,6 +870,67 @@ const AdminDashboard = () => {
                 </svg>
                 Download Excel of Passwords
               </button>
+
+              {/* ⚙️ Settings Button with Dropdown */}
+              <div className="relative" ref={settingsDropdownRef}>
+                <button
+                  id="settings-btn"
+                  onClick={() => setShowSettingsDropdown(v => !v)}
+                  className="bg-gray-700 hover:bg-gray-800 text-white px-3 py-2 rounded-lg transition flex items-center gap-2"
+                  title="Settings"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className={`h-5 w-5 transition-transform duration-300 ${showSettingsDropdown ? 'rotate-45' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
+                  <span className="text-sm font-medium">Settings</span>
+                </button>
+
+                {showSettingsDropdown && (
+                  <div className="absolute right-0 mt-2 w-64 bg-white border border-gray-200 rounded-xl shadow-xl z-50 overflow-hidden">
+                    <div className="px-4 py-2 bg-gray-50 border-b border-gray-100">
+                      <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Admin Settings</p>
+                    </div>
+                    <button
+                      id="settings-set-2nd-admin-btn"
+                      onClick={() => {
+                        setShowSettingsDropdown(false);
+                        setSecondAdminStep(1);
+                        setSecondAdminPrimaryPw('');
+                        setSecondAdminOtp('');
+                        setSecondAdminNewPw('');
+                        setSecondAdminConfirmPw('');
+                        setSecondAdminError('');
+                        setSecondAdminFlowToken('');
+                        setSecondAdminOtpSentToken('');
+                        setSecondAdminSetPwToken('');
+                        setShowSecondAdminModal(true);
+                      }}
+                      className="w-full text-left px-4 py-3 hover:bg-blue-50 transition flex items-center gap-3 group"
+                    >
+                      <span className="text-xl">🔐</span>
+                      <div>
+                        <p className="text-sm font-semibold text-gray-700 group-hover:text-blue-700">Set up password for 2nd Admin</p>
+                        <p className="text-xs text-gray-400">Secure 4-step verification flow</p>
+                      </div>
+                    </button>
+                    <button
+                      id="settings-get-help-btn"
+                      onClick={() => {
+                        setShowSettingsDropdown(false);
+                        window.open('mailto:ommurkar34@gmail.com?subject=PMS Help Request', '_blank');
+                      }}
+                      className="w-full text-left px-4 py-3 hover:bg-gray-50 transition flex items-center gap-3 group border-t border-gray-100"
+                    >
+                      <span className="text-xl">❓</span>
+                      <div>
+                        <p className="text-sm font-semibold text-gray-700 group-hover:text-gray-900">Get Help</p>
+                        <p className="text-xs text-gray-400">Contact system administrator</p>
+                      </div>
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -1192,6 +1392,230 @@ const AdminDashboard = () => {
                   >
                     Save Changes
                   </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ========================================================= */}
+          {/* SECONDARY ADMIN SETUP MODAL (4-Step Secure Flow)          */}
+          {/* ========================================================= */}
+          {showSecondAdminModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-[100]" style={{ backdropFilter: 'blur(4px)' }}>
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+
+                {/* Modal Header */}
+                <div className="bg-gradient-to-r from-slate-800 to-slate-700 px-6 py-4 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 bg-white bg-opacity-10 rounded-lg flex items-center justify-center text-lg">🔐</div>
+                    <div>
+                      <h3 className="text-white font-bold text-base">Set Up 2nd Admin Password</h3>
+                      <div className="flex items-center gap-1 mt-0.5">
+                        {[1,2,3,4].map(s => (
+                          <div key={s} className={`h-1.5 rounded-full transition-all duration-300 ${
+                            secondAdminStep > s ? 'w-6 bg-green-400' :
+                            secondAdminStep === s ? 'w-6 bg-blue-400' :
+                            'w-3 bg-white bg-opacity-20'
+                          }`} />
+                        ))}
+                        <span className="text-white text-opacity-60 text-xs ml-1">Step {Math.min(secondAdminStep, 4)}/4</span>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowSecondAdminModal(false)}
+                    className="text-white text-opacity-60 hover:text-opacity-100 transition"
+                    disabled={secondAdminLoading}
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+
+                <div className="px-6 py-5">
+
+                  {/* Error Banner */}
+                  {secondAdminError && (
+                    <div className="mb-4 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm flex items-start gap-2">
+                      <span className="mt-0.5">⚠</span>
+                      <span>{secondAdminError}</span>
+                    </div>
+                  )}
+
+                  {/* ── STEP 1: Primary Admin Password Verification ── */}
+                  {secondAdminStep === 1 && (
+                    <div>
+                      <p className="text-gray-500 text-sm mb-5">
+                        To begin, confirm your identity by entering your current admin password.
+                      </p>
+                      <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Your Admin Password</label>
+                      <input
+                        id="second-admin-primary-pw"
+                        type="password"
+                        value={secondAdminPrimaryPw}
+                        onChange={e => { setSecondAdminPrimaryPw(e.target.value); setSecondAdminError(''); }}
+                        className="w-full border border-gray-300 rounded-lg px-4 py-3 focus:ring-2 focus:ring-slate-500 focus:outline-none text-sm"
+                        placeholder="Enter your current password"
+                        autoFocus
+                        disabled={secondAdminLoading}
+                        onKeyDown={e => { if (e.key === 'Enter') handleSecondAdminStep1(); }}
+                      />
+                      <div className="flex gap-3 mt-5">
+                        <button onClick={() => setShowSecondAdminModal(false)} className="flex-1 px-4 py-2.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition text-sm font-medium" disabled={secondAdminLoading}>Cancel</button>
+                        <button
+                          id="second-admin-step1-btn"
+                          onClick={handleSecondAdminStep1}
+                          disabled={secondAdminLoading || !secondAdminPrimaryPw}
+                          className="flex-1 px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 transition text-sm font-semibold disabled:opacity-50 flex items-center justify-center gap-2"
+                        >
+                          {secondAdminLoading ? <span className="animate-spin">⏳</span> : null}
+                          {secondAdminLoading ? 'Verifying...' : 'Verify & Continue →'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── STEP 2: OTP Dispatched — Prompt to Send ── */}
+                  {secondAdminStep === 2 && (
+                    <div>
+                      <div className="text-center py-3 mb-5">
+                        <div className="text-4xl mb-3">✅</div>
+                        <h4 className="font-bold text-gray-800 text-base">Identity Confirmed</h4>
+                        <p className="text-gray-500 text-sm mt-2">
+                          Click below to send a 60-second OTP to the Secondary Admin's registered email.
+                          They must share it with you.
+                        </p>
+                      </div>
+                      <div className="flex gap-3">
+                        <button onClick={() => { setSecondAdminStep(1); setSecondAdminError(''); }} className="flex-1 px-4 py-2.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition text-sm font-medium" disabled={secondAdminLoading}>← Back</button>
+                        <button
+                          id="second-admin-send-otp-btn"
+                          onClick={handleSecondAdminSendOtp}
+                          disabled={secondAdminLoading}
+                          className="flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm font-semibold disabled:opacity-50 flex items-center justify-center gap-2"
+                        >
+                          {secondAdminLoading ? <span className="animate-spin">⏳</span> : '📧'}
+                          {secondAdminLoading ? 'Sending OTP...' : 'Send OTP to 2nd Admin'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── STEP 3: OTP Input ── */}
+                  {secondAdminStep === 3 && (
+                    <div>
+                      <div className="bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 mb-5 text-sm">
+                        <p className="font-semibold text-blue-700">📧 OTP sent to:</p>
+                        <p className="text-blue-600 font-mono text-xs mt-0.5">{secondAdminMaskedEmail}</p>
+                        <p className="text-blue-500 text-xs mt-1">Ask the 2nd Admin to share the code they received. It expires in 60 seconds.</p>
+                      </div>
+                      <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">6-Digit OTP</label>
+                      <input
+                        id="second-admin-otp-input"
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={6}
+                        value={secondAdminOtp}
+                        onChange={e => { setSecondAdminOtp(e.target.value.replace(/\D/g, '')); setSecondAdminError(''); }}
+                        className="w-full border border-gray-300 rounded-lg px-4 py-3 focus:ring-2 focus:ring-blue-500 focus:outline-none text-center text-2xl font-bold tracking-[0.5em] text-gray-800"
+                        placeholder="------"
+                        autoFocus
+                        disabled={secondAdminLoading}
+                        onKeyDown={e => { if (e.key === 'Enter') handleSecondAdminVerifyOtp(); }}
+                      />
+                      <div className="flex gap-3 mt-5">
+                        <button
+                          onClick={handleSecondAdminSendOtp}
+                          disabled={secondAdminLoading}
+                          className="px-3 py-2.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition text-xs font-medium"
+                          title="Resend OTP"
+                        >🔁 Resend</button>
+                        <button
+                          id="second-admin-verify-otp-btn"
+                          onClick={handleSecondAdminVerifyOtp}
+                          disabled={secondAdminLoading || secondAdminOtp.length !== 6}
+                          className="flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm font-semibold disabled:opacity-50 flex items-center justify-center gap-2"
+                        >
+                          {secondAdminLoading ? <span className="animate-spin">⏳</span> : null}
+                          {secondAdminLoading ? 'Verifying...' : 'Verify OTP →'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── STEP 4: Set New Password ── */}
+                  {secondAdminStep === 4 && (
+                    <div>
+                      <div className="bg-green-50 border border-green-100 rounded-lg px-4 py-3 mb-5 text-sm">
+                        <p className="font-semibold text-green-700">✅ OTP verified. Set the new password for the 2nd Admin.</p>
+                        <p className="text-green-600 text-xs mt-0.5 font-mono">{secondAdminMaskedEmail}</p>
+                      </div>
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">New Password</label>
+                          <input
+                            id="second-admin-new-pw"
+                            type="password"
+                            value={secondAdminNewPw}
+                            onChange={e => { setSecondAdminNewPw(e.target.value); setSecondAdminError(''); }}
+                            className="w-full border border-gray-300 rounded-lg px-4 py-3 focus:ring-2 focus:ring-green-500 focus:outline-none text-sm"
+                            placeholder="Minimum 8 characters"
+                            autoFocus
+                            disabled={secondAdminLoading}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Confirm Password</label>
+                          <input
+                            id="second-admin-confirm-pw"
+                            type="password"
+                            value={secondAdminConfirmPw}
+                            onChange={e => { setSecondAdminConfirmPw(e.target.value); setSecondAdminError(''); }}
+                            className="w-full border border-gray-300 rounded-lg px-4 py-3 focus:ring-2 focus:ring-green-500 focus:outline-none text-sm"
+                            placeholder="Re-enter new password"
+                            disabled={secondAdminLoading}
+                            onKeyDown={e => { if (e.key === 'Enter') handleSecondAdminSetPassword(); }}
+                          />
+                        </div>
+                        {secondAdminNewPw && secondAdminConfirmPw && secondAdminNewPw !== secondAdminConfirmPw && (
+                          <p className="text-red-500 text-xs">⚠ Passwords do not match.</p>
+                        )}
+                      </div>
+                      <div className="flex gap-3 mt-5">
+                        <button onClick={() => setShowSecondAdminModal(false)} className="flex-1 px-4 py-2.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition text-sm font-medium" disabled={secondAdminLoading}>Cancel</button>
+                        <button
+                          id="second-admin-set-pw-btn"
+                          onClick={handleSecondAdminSetPassword}
+                          disabled={secondAdminLoading || !secondAdminNewPw || !secondAdminConfirmPw || secondAdminNewPw !== secondAdminConfirmPw}
+                          className="flex-1 px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm font-semibold disabled:opacity-50 flex items-center justify-center gap-2"
+                        >
+                          {secondAdminLoading ? <span className="animate-spin">⏳</span> : '🔑'}
+                          {secondAdminLoading ? 'Setting Password...' : 'Set Password'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── STEP 5: Success ── */}
+                  {secondAdminStep === 5 && (
+                    <div className="text-center py-4">
+                      <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4 text-3xl">✅</div>
+                      <h4 className="font-bold text-gray-800 text-lg">Password Set Successfully!</h4>
+                      <p className="text-gray-500 text-sm mt-2 mb-1">
+                        The Secondary Admin can now log in at
+                      </p>
+                      <p className="font-mono text-xs text-blue-600 bg-blue-50 rounded px-2 py-1 inline-block">/admin/login</p>
+                      <p className="text-gray-400 text-xs mt-3">with their registered email and the new password.</p>
+                      <button
+                        onClick={() => setShowSecondAdminModal(false)}
+                        className="mt-6 w-full px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 transition text-sm font-semibold"
+                      >
+                        Done
+                      </button>
+                    </div>
+                  )}
+
                 </div>
               </div>
             </div>

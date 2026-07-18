@@ -136,6 +136,32 @@ const ExamWizard = () => {
     return imageMap;
   };
 
+  // ── EXCEL SANITIZATION ─────────────────────────────────────────────────
+  // Strips all ExcelJS rich text / formatting (including bold) from a cell value.
+  // Handles: plain strings, numbers, RichText objects ({ richText: [...] }),
+  // hyperlink objects ({ text, hyperlink }), formula results, dates, booleans.
+  // Returns a clean string or the raw value for numbers.
+  const sanitizeCellValue = (cellValue) => {
+    if (cellValue === null || cellValue === undefined) return '';
+    // ExcelJS RichText: { richText: [{ text: 'hello', font: { bold: true } }, ...] }
+    if (typeof cellValue === 'object' && cellValue.richText && Array.isArray(cellValue.richText)) {
+      return cellValue.richText.map(part => (part.text || '')).join('').trim();
+    }
+    // Hyperlink object: { text: '...', hyperlink: '...' }
+    if (typeof cellValue === 'object' && cellValue.text) {
+      return String(cellValue.text).trim();
+    }
+    // Formula result
+    if (typeof cellValue === 'object' && cellValue.result !== undefined) {
+      return String(cellValue.result).trim();
+    }
+    // Date
+    if (cellValue instanceof Date) {
+      return cellValue.toISOString();
+    }
+    return String(cellValue).trim();
+  };
+
   const handleStudentsUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -161,14 +187,14 @@ const ExamWizard = () => {
             if (rowNumber === 1) return; // Skip Header
             
             const promise = async () => {
-                const rollRaw = row.getCell(1).value; 
-                const nameRaw = row.getCell(2).value; 
+                const rollRaw = sanitizeCellValue(row.getCell(1).value); 
+                const nameRaw = sanitizeCellValue(row.getCell(2).value); 
 
                 if (!rollRaw || !nameRaw) return null; 
 
                 studentCount++;
-                const roll_no = rollRaw.toString().trim();
-                const name = nameRaw.toString().trim();
+                const roll_no = rollRaw;
+                const name = nameRaw;
                 let imageUrl = "";
 
                 if (imageMap[rowNumber]) {
@@ -241,15 +267,15 @@ const ExamWizard = () => {
             if (rowNumber === 1) return;
 
             const promise = async () => {
-                const idRaw = row.getCell(1).value;    
-                const topicRaw = row.getCell(2).value; 
-                const marksRaw = row.getCell(4).value; 
+                const idRaw = sanitizeCellValue(row.getCell(1).value);    
+                const topicRaw = sanitizeCellValue(row.getCell(2).value); 
+                const marksRaw = sanitizeCellValue(row.getCell(4).value); 
 
                 if (!idRaw || !topicRaw) return null;
 
                 qCount++;
-                const question_id = idRaw.toString().trim();
-                const topic = topicRaw.toString().trim();
+                const question_id = idRaw;
+                const topic = topicRaw;
                 const marks = parseInt(marksRaw) || 0;
                 let imageUrl = "";
 
@@ -469,7 +495,7 @@ const ExamWizard = () => {
               <div className="space-y-4">
                 <div className="grid md:grid-cols-2 gap-4">
                   <div><label className="block text-gray-700 font-bold mb-2">Subject Name *</label><input type="text" value={subjectName} onChange={handleSubjectChange} className="w-full border rounded-lg px-4 py-2" required /></div>
-                  <div><label className="block text-gray-700 font-bold mb-2">Session Code *</label><input type="text" value={sessionCode} onChange={(e) => setSessionCode(e.target.value)} className="w-full border rounded-lg px-4 py-2 bg-gray-50" placeholder="e.g., MATH123a" required /></div>
+                  <div><label className="block text-gray-700 font-bold mb-2">Session Code *</label><input type="text" value={sessionCode} readOnly className="w-full border rounded-lg px-4 py-2 bg-gray-100 cursor-not-allowed text-gray-500" title="Session code is auto-generated and cannot be modified" required /></div>
                 </div>
                 <div className="grid md:grid-cols-2 gap-4">
                   <div>

@@ -44,10 +44,18 @@ const AdminLogin = () => {
       // 4. Redirect to Dashboard
       navigate('/admin/dashboard');
     } catch (err) {
-      console.error('Error during admin login:', err);
-      // Map common Firebase auth errors to user-friendly messages
-      if (err.code === 'auth/invalid-credential' || err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
-        setError('Invalid email or password.');
+      // Map Firebase error codes to concise, user-friendly messages
+      const code = err.code || '';
+      if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+        setError('Incorrect password');
+      } else if (code === 'auth/user-not-found') {
+        setError('No account found with this email');
+      } else if (code === 'auth/too-many-requests') {
+        setError('Too many attempts. Please try again later');
+      } else if (code === 'auth/network-request-failed') {
+        setError('Network error. Check your connection');
+      } else if (err.message === 'Unauthorized. You do not have Admin privileges.') {
+        setError('Unauthorized access');
       } else {
         setError(err.message || 'Login failed. Please try again.');
       }

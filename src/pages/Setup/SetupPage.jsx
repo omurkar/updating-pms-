@@ -15,8 +15,7 @@ import { auth, db } from '../../firebase';
  * DELETE or disable this route in App.jsx after first use for security.
  */
 
-const SUPER_ADMIN_EMAIL = 'ommurkar34@gmail.com';
-const SUPER_ADMIN_PASSWORD = 'PmsFounder@2025'; // Change this after first login!
+
 
 const SetupPage = () => {
   const [status, setStatus] = useState('');

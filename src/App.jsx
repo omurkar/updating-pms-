@@ -89,6 +89,7 @@ import About from './pages/About';
 import AdminLogin from './pages/Admin/AdminLogin';
 import AdminDashboard from './pages/Admin/AdminDashboard';
 import AdminActivation from './pages/Admin/AdminActivation';
+import ActivationSuccess from './pages/Admin/ActivationSuccess';
 import TeacherLogin from './pages/Teacher/TeacherLogin';
 import TeacherDashboard from './pages/Teacher/Dashboard';
 import ExamWizard from './pages/Teacher/ExamWizard';
@@ -98,6 +99,7 @@ import ExamInterface from './pages/Student/ExamInterface';
 import SuperAdminLogin from './pages/SuperAdmin/SuperAdminLogin';
 import SuperAdminKeyGenerator from './pages/SuperAdmin/KeyGenerator';
 import SuperAdminDashboard from './pages/SuperAdmin/SuperAdminDashboard';
+import NotFound from './pages/NotFound';
 // ── SECURITY FIX A-1: Route-level guard for all Super Admin pages ──
 import SuperAdminRoute from './components/SuperAdminRoute';
 
@@ -109,7 +111,7 @@ function App() {
   return (
     <AuthProvider>
       <TenantProvider>
-      <Router>
+      <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         {/* GLOBAL NAVBAR REMOVED HERE TO FIX DOUBLE NAVBAR ISSUE */}
         <Routes>
           <Route path="/" element={<Home />} />
@@ -118,6 +120,8 @@ function App() {
           <Route path="/admin/login" element={<AdminLogin />} />
           <Route path="/admin/activate" element={<AdminActivation />} />
           <Route path="/admin/dashboard" element={<AdminDashboard />} />
+          {/* Success page after key activation */}
+          <Route path="/admin/activation-success" element={<ActivationSuccess />} />
           
           <Route path="/teacher/login" element={<TeacherLogin />} />
           <Route path="/teacher/dashboard" element={<TeacherDashboard />} />
@@ -138,7 +142,8 @@ function App() {
             <SuperAdminRoute><SuperAdminKeyGenerator /></SuperAdminRoute>
           } />
           
-          <Route path="*" element={<Navigate to="/" replace />} />
+          {/* 404 — show proper Not Found page instead of silent redirect */}
+          <Route path="*" element={<NotFound />} />
         </Routes>
       </Router>
       </TenantProvider>

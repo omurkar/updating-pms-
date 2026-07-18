@@ -422,6 +422,45 @@ const Monitor = () => {
   const handleReject = async (studentId) => { if (!window.confirm("Reject submission? Student will be able to edit.")) return; try { await updateDoc(doc(db, 'colleges', tenantId, 'students', studentId), { status: 'in_progress' }); alert("Submission Rejected."); setSelectedStudent(null); } catch (error) { alert(error.message); } };
   const handleResumeSession = async (studentId) => { if (!window.confirm("Undo 'End Session'?")) return; try { await updateDoc(doc(db, 'colleges', tenantId, 'students', studentId), { session_ended: false }); alert("Session Resumed."); setSelectedStudent(null); } catch (error) { alert(error.message); } };
 
+  // ── GLOBAL SESSION RESUME ─────────────────────────────────────────────
+  // Re-activates an ended exam WITHOUT overwriting any student records.
+  // Takes a snapshot of all student states for audit trail before resuming.
+  const handleResumeGlobalSession = async () => {
+    if (!window.confirm("⚠️ Resume this ended session?\n\nAll existing data (submissions, grades, attendance) will be preserved.")) return;
+    try {
+      // Snapshot all current student states for audit
+      const snapshot = {
+        resumed_at: new Date(),
+        resumed_by: currentUser?.email || 'unknown',
+        student_states: students.map(s => ({
+          id: s.id,
+          roll_no: s.roll_no,
+          name: s.name,
+          status: s.status,
+          is_graded: s.is_graded || false,
+          session_ended: s.session_ended || false,
+          scores: s.scores || {},
+        })),
+      };
+
+      const batch = writeBatch(db);
+      const examRef = doc(db, 'colleges', tenantId, 'exams', sessionCode);
+
+      // 1. Re-activate the exam — ONLY flip is_active, preserve everything else
+      batch.update(examRef, { is_active: true });
+
+      // 2. Save the snapshot as a subcollection doc for audit trail
+      const snapshotRef = doc(db, 'colleges', tenantId, 'exams', sessionCode, 'resume_snapshots', `resume_${Date.now()}`);
+      batch.set(snapshotRef, snapshot);
+
+      await batch.commit();
+      alert("✅ Session Resumed!\n\nAll student submissions, grades, and attendance records are preserved.");
+    } catch (error) {
+      alert("Failed to resume session: " + error.message);
+    }
+  };
+
+
   // --- LOGIC FIX: Absent students NOT forced to score 0 in DB ---
   const handleEndForAll = async () => {
     if (!window.confirm("🔴 DANGER: Stop exam for ALL students?")) return;
@@ -663,10 +702,15 @@ const Monitor = () => {
     try {
       const targetMarks = examDetails?.practical_marks;
       const assignedQuestions = generateSlipForStudent(targetMarks);
-
       const studentId = `${sessionCode}_${rollClean}`;
 
-      await setDoc(doc(db, 'colleges', tenantId, 'students', studentId), {
+      // ATOMIC: Both the student record and audit log are written in a single batch.
+      // If either write fails, neither is persisted — no orphaned records.
+      const batch = writeBatch(db);
+
+      // 1. Student doc (contains both attendance status and score initialization)
+      const studentRef = doc(db, 'colleges', tenantId, 'students', studentId);
+      batch.set(studentRef, {
         roll_no: rollClean,
         name: nameClean,
         image: '',
@@ -687,6 +731,18 @@ const Monitor = () => {
         buffer_remark: bufferRemark.trim(),
         added_at: new Date()
       });
+
+      // 2. Audit log entry (atomic with student creation — rolls back together)
+      const auditRef = doc(db, 'colleges', tenantId, 'exams', sessionCode, 'buffer_audit', studentId);
+      batch.set(auditRef, {
+        roll_no: rollClean,
+        name: nameClean,
+        remark: bufferRemark.trim(),
+        added_by: currentUser?.email || 'unknown',
+        added_at: new Date()
+      });
+
+      await batch.commit();
 
       // Reset & close
       setBufferName('');
@@ -714,7 +770,17 @@ const Monitor = () => {
             <div className='flex items-center gap-4'>
               <div>
                 <h1 className="text-3xl font-bold text-gray-800">Live Monitor - {sessionCode}</h1>
-                {!isSessionActive && <span className="bg-red-100 text-red-800 text-sm font-bold px-2 py-1 rounded border border-red-200 mt-2 inline-block">🔴 Session Ended</span>}
+                {!isSessionActive && (
+                  <div className="flex items-center gap-2 mt-2">
+                    <span className="bg-red-100 text-red-800 text-sm font-bold px-2 py-1 rounded border border-red-200 inline-block">🔴 Session Ended</span>
+                    <button
+                      onClick={handleResumeGlobalSession}
+                      className="bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold px-3 py-1 rounded-lg shadow-sm transition flex items-center gap-1"
+                    >
+                      ▶️ Resume Session
+                    </button>
+                  </div>
+                )}
               </div>
               {isSessionActive && timeRemaining !== null && (
                 <div className={`text-2xl font-mono font-bold px-4 py-2 rounded-lg border-2 ${timeRemaining < 0 ? 'bg-red-50 text-red-600 border-red-200 animate-pulse' : 'bg-gray-800 text-green-400 border-gray-700'}`}>
@@ -952,6 +1018,8 @@ const Monitor = () => {
                       <div className="absolute top-0 right-0 flex flex-col items-end">
                         {showScore && <div className="text-white text-xs font-bold px-2 py-1 rounded-bl bg-blue-600">Score: {student.scores?.total || 0}</div>}
                         {student.session_ended && <div className="bg-gray-800 text-white text-xs font-bold px-2 py-1 rounded-bl shadow-sm border-t border-gray-600">ENDED</div>}
+                        {student.is_buffer_student && <div className="bg-amber-500 text-white text-xs font-bold px-2 py-1 rounded-bl shadow-sm">C</div>}
+                        {student.is_slip_changed && <div className="bg-orange-400 text-white text-xs font-bold px-2 py-1 rounded-bl shadow-sm">Slip Changed</div>}
                       </div>
 
                       <div className={`font-bold text-lg ${textColor}`}>{student.name}</div>
@@ -979,9 +1047,12 @@ const Monitor = () => {
                         {selectedStudent.is_graded && <span className="bg-green-100 text-green-800 text-xs font-bold px-2 py-1 rounded border border-green-200">🎓 Graded</span>}
                       </div>
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 items-center">
                       {selectedStudent.session_ended && (
                         <button onClick={() => handleResumeSession(selectedStudent.id)} className="bg-purple-100 text-purple-700 border border-purple-300 hover:bg-purple-200 px-3 py-1 rounded text-sm font-bold transition flex items-center gap-1">↩️ Undo End Session</button>
+                      )}
+                      {selectedStudent.is_buffer_student && (
+                        <span className="bg-amber-100 text-amber-800 text-xs font-bold px-2 py-1 rounded border border-amber-300 flex items-center gap-1">🅱️ Buffer Student</span>
                       )}
                       {canChangeSlip && !isChangingSlip && <button onClick={handleOpenSlipChange} className="bg-blue-100 hover:bg-blue-200 text-blue-800 px-3 py-1 rounded text-sm font-medium transition">🔄 Change Slip</button>}
                       <button onClick={() => setSelectedStudent(null)} className="text-gray-500 hover:text-gray-700 text-2xl leading-none">×</button>

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { collection, onSnapshot, query, orderBy, doc, updateDoc, getDoc, Timestamp } from 'firebase/firestore';
+import { collection, onSnapshot, query, orderBy, doc, updateDoc, getDoc, deleteDoc, Timestamp } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { db, auth } from '../../firebase';
 import KeyGenerator from './KeyGenerator';
@@ -26,6 +26,9 @@ const SuperAdminDashboard = () => {
     facultyEmails: [],
   });
   const [savingKey, setSavingKey] = useState(false);
+  // ── Delete state ──
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState(null); // key object to delete
+  const [deletingKeyId, setDeletingKeyId] = useState(null);
 
   // Helper to calculate days left
   const calculateDaysLeft = (validUntilDate) => {
@@ -123,6 +126,27 @@ const SuperAdminDashboard = () => {
     sessionStorage.removeItem('superAdminAuthenticated');
     try { await auth.signOut(); } catch (e) { /* ignore */ }
     navigate('/super_admin/LIO-73-23/2372/SYSTEM');
+  };
+
+  // ── Delete handler: removes from Firestore (client + backend Admin SDK) ──
+  const handleDeleteKey = async () => {
+    if (!confirmDeleteKey) return;
+    setDeletingKeyId(confirmDeleteKey.id);
+    try {
+      // Client-side delete (instant UI update via onSnapshot)
+      await deleteDoc(doc(db, 'product_keys', confirmDeleteKey.id));
+      // Also call backend for Admin SDK authoritative delete (belt-and-suspenders)
+      fetch(`${API_URL}/api/product-keys/${confirmDeleteKey.id}`, { method: 'DELETE' })
+        .catch(() => { /* Non-fatal: client delete already succeeded */ });
+      // Close modals
+      setConfirmDeleteKey(null);
+      if (selectedKey?.id === confirmDeleteKey.id) setSelectedKey(null);
+    } catch (err) {
+      console.error('Delete failed:', err);
+      alert('Failed to delete key: ' + err.message);
+    } finally {
+      setDeletingKeyId(null);
+    }
   };
 
 
@@ -390,6 +414,7 @@ const SuperAdminDashboard = () => {
             <div style={{ padding: '40px', textAlign: 'center', color: 'rgba(255,255,255,0.5)' }}>No keys generated yet.</div>
           ) : (
             <div style={{ overflowX: 'auto' }}>
+
               <table>
                 <thead>
                   <tr>
@@ -398,6 +423,7 @@ const SuperAdminDashboard = () => {
                     <th>Reg. Number</th>
                     <th>Valid Until</th>
                     <th>Status</th>
+                    <th style={{ textAlign: 'center', width: '60px' }}>Delete</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -433,6 +459,37 @@ const SuperAdminDashboard = () => {
                             Expired
                           </span>
                         )}
+                      </td>
+                      {/* ─── Trash Delete Button ─── */}
+                      <td style={{ textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                        <button
+                          title="Delete key"
+                          disabled={deletingKeyId === keyObj.id}
+                          onClick={() => setConfirmDeleteKey(keyObj)}
+                          style={{
+                            background: 'transparent',
+                            border: '1px solid rgba(255,69,0,0.25)',
+                            borderRadius: '6px',
+                            color: 'rgba(255,80,80,0.6)',
+                            cursor: 'pointer',
+                            padding: '6px 9px',
+                            fontSize: '15px',
+                            lineHeight: 1,
+                            transition: 'all 0.2s',
+                          }}
+                          onMouseEnter={e => {
+                            e.currentTarget.style.background = 'rgba(255,50,50,0.12)';
+                            e.currentTarget.style.color = '#ff5555';
+                            e.currentTarget.style.borderColor = 'rgba(255,50,50,0.5)';
+                          }}
+                          onMouseLeave={e => {
+                            e.currentTarget.style.background = 'transparent';
+                            e.currentTarget.style.color = 'rgba(255,80,80,0.6)';
+                            e.currentTarget.style.borderColor = 'rgba(255,69,0,0.25)';
+                          }}
+                        >
+                          {deletingKeyId === keyObj.id ? '⏳' : '🗑️'}
+                        </button>
                       </td>
                     </tr>
                   )})}</tbody>
@@ -686,6 +743,66 @@ const SuperAdminDashboard = () => {
                 )}
               </div>
             )}
+          </div>
+        </div>
+      )}
+      {/* ─── Delete Confirmation Dialog ─── */}
+      {confirmDeleteKey && (
+        <div className="modal-overlay" onClick={() => setConfirmDeleteKey(null)}>
+          <div
+            className="modal-content"
+            onClick={e => e.stopPropagation()}
+            style={{ maxWidth: '420px', textAlign: 'center' }}
+          >
+            <div style={{ fontSize: '40px', marginBottom: '12px' }}>🗑️</div>
+            <h2 style={{ fontSize: '18px', fontWeight: '700', margin: '0 0 10px', color: '#fff' }}>
+              Delete Product Key?
+            </h2>
+            <p style={{ fontSize: '13px', color: 'rgba(255,255,255,0.5)', lineHeight: '1.7', margin: '0 0 6px' }}>
+              You are about to permanently delete the key for:
+            </p>
+            <div style={{
+              background: 'rgba(255,69,0,0.07)',
+              border: '1px solid rgba(255,69,0,0.2)',
+              borderRadius: '8px',
+              padding: '12px 16px',
+              margin: '8px 0 24px',
+            }}>
+              <div style={{ fontWeight: '600', color: '#fff', marginBottom: '4px' }}>{confirmDeleteKey.collegeName}</div>
+              <div style={{ fontFamily: 'Fira Code, monospace', fontSize: '12px', color: '#fbbf24', letterSpacing: '1px' }}>
+                {confirmDeleteKey.productKey}
+              </div>
+            </div>
+            <p style={{ fontSize: '12px', color: 'rgba(255,80,80,0.8)', marginBottom: '24px' }}>
+              ⚠️ This action cannot be undone. The key will be removed from both the UI and Firebase.
+            </p>
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
+              <button
+                className="dash-btn-secondary"
+                onClick={() => setConfirmDeleteKey(null)}
+                disabled={!!deletingKeyId}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteKey}
+                disabled={!!deletingKeyId}
+                style={{
+                  padding: '10px 24px',
+                  background: 'linear-gradient(135deg, #8b0000, #cc0033)',
+                  border: 'none',
+                  borderRadius: '8px',
+                  color: 'white',
+                  fontWeight: '600',
+                  fontSize: '14px',
+                  cursor: deletingKeyId ? 'not-allowed' : 'pointer',
+                  opacity: deletingKeyId ? 0.5 : 1,
+                  transition: 'all 0.2s',
+                }}
+              >
+                {deletingKeyId ? '⏳ Deleting...' : '🗑️ Yes, Delete'}
+              </button>
+            </div>
           </div>
         </div>
       )}

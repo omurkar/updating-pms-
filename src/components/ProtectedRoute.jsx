@@ -4,13 +4,17 @@ import { useState, useEffect } from 'react';
 import { collection, query, where, getDocs } from 'firebase/firestore';
 import { db } from '../firebase';
 import KeyExpiryPopup from './KeyExpiryPopup';
+import LoadingPage from './LoadingPage';
 
 const ProtectedRoute = ({ children, allowedRoles }) => {
-  const { currentUser, userRole } = useAuth();
+  const { currentUser, userRole, loading: authLoading } = useAuth();
   const [isExpired, setIsExpired] = useState(false);
   const [loadingExpiry, setLoadingExpiry] = useState(true);
 
-  // Determine actual role being accessed
+  // ── REFRESH FIX ──
+  // While Firebase Auth is still re-hydrating (authLoading=true), show a
+  // loading screen instead of immediately redirecting. This prevents the
+  // "Not Found / logged out" flash on browser refresh.
   const adminEmail = sessionStorage.getItem('adminEmail');
   const actualRole = allowedRoles?.includes('admin') && adminEmail ? 'admin' : userRole;
 
@@ -33,14 +37,12 @@ const ProtectedRoute = ({ children, allowedRoles }) => {
         if (q) {
           const snapshot = await getDocs(q);
           if (!snapshot.empty) {
-            // Take the most recent key if there are multiple
             const docs = snapshot.docs.map(d => d.data());
             docs.sort((a, b) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0));
-            
+
             const mostRecentKey = docs[0];
             if (mostRecentKey && mostRecentKey.validUntil) {
               const expiryDate = new Date(mostRecentKey.validUntil);
-              // End of the day for validUntil
               expiryDate.setHours(23, 59, 59, 999);
               if (expiryDate < new Date()) {
                 setIsExpired(true);
@@ -49,7 +51,7 @@ const ProtectedRoute = ({ children, allowedRoles }) => {
           }
         }
       } catch (err) {
-        console.error("Error checking expiry:", err);
+        console.error('Error checking expiry:', err);
       } finally {
         setLoadingExpiry(false);
       }
@@ -62,11 +64,19 @@ const ProtectedRoute = ({ children, allowedRoles }) => {
     }
   }, [actualRole, adminEmail, currentUser]);
 
-  // Check for admin session via sessionStorage (admin key login)
+  // ── REFRESH FIX: Wait for Firebase Auth to resolve before making any routing decision ──
+  if (authLoading) {
+    return <LoadingPage message="Restoring your session..." />;
+  }
+
+  // Check for admin session: sessionStorage (fast path) OR Firebase Auth (after refresh)
   if (allowedRoles && allowedRoles.includes('admin')) {
     const adminAuthenticated = sessionStorage.getItem('adminAuthenticated');
-    if (adminAuthenticated === 'true') {
-      if (loadingExpiry) return <div>Loading...</div>;
+    // Accept either sessionStorage flag OR Firebase-confirmed admin role
+    const isAdmin = adminAuthenticated === 'true' || (currentUser && userRole === 'admin');
+
+    if (isAdmin) {
+      if (loadingExpiry) return <LoadingPage message="Verifying subscription..." />;
       if (isExpired) return <KeyExpiryPopup role="admin" />;
       return children;
     }
@@ -80,7 +90,7 @@ const ProtectedRoute = ({ children, allowedRoles }) => {
     return <Navigate to="/" replace />;
   }
 
-  if (loadingExpiry) return <div>Loading...</div>;
+  if (loadingExpiry) return <LoadingPage message="Verifying subscription..." />;
   if (isExpired) return <KeyExpiryPopup role={actualRole} />;
 
   return children;

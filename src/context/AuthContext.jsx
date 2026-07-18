@@ -52,6 +52,12 @@ export const AuthProvider = ({ children }) => {
                 setUserRole('admin');
                 const tid = adminDoc.data().tenantId;
                 if (tid) sessionStorage.setItem('tenantId', tid);
+                // ── REFRESH FIX: Re-populate admin session from Firestore ──
+                // When Firebase Auth re-hydrates after a browser refresh, the
+                // sessionStorage-based flags are cleared. We restore them here
+                // so ProtectedRoute can detect the active session immediately.
+                sessionStorage.setItem('adminAuthenticated', 'true');
+                if (user.email) sessionStorage.setItem('adminEmail', user.email);
               } else {
                 // Not a college admin — check super_admins
                 const superAdminDoc = await getDoc(doc(db, 'super_admins', user.uid));
@@ -85,6 +91,7 @@ export const AuthProvider = ({ children }) => {
       setLoading(false);
     });
   }, []);
+
 
   // Teacher login with email/password
   const teacherLogin = async (email, password) => {
