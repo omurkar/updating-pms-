@@ -680,33 +680,72 @@ const Monitor = () => {
     XLSX.writeFile(workbook, `${sessionCode}_Attendance.xlsx`);
   };
 
-  // --- LOGIC FIX: Export ABSENT in result sheet instead of 0 ---
+  // --- RESULT EXPORT: Differentiates between Internal and Practical exam formats ---
   const handleExportResults = () => {
     if (students.length === 0) return;
     const dateObj = examDetails?.created_at?.toDate ? examDetails.created_at.toDate() : new Date();
     const dateStr = dateObj.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase();
     const dept = (examDetails?.student_department || 'Unknown').toUpperCase();
     const subject = (examDetails?.subject_name || 'Unknown').toUpperCase();
-    const year = (examDetails?.student_year || 'Unknown').toUpperCase();
 
-    const dataRows = students.map((student, index) => {
-      const isAbsent = student.status === 'absent' || student.status === 'registered';
-      return [
-        index + 1,
-        student.roll_no,
-        student.name,
-        isAbsent ? 'ABSENT' : (student.scores?.practical || 0),
-        isAbsent ? '-' : (student.scores?.viva || 0),
-        isAbsent ? '-' : (student.scores?.journal || 0),
-        isAbsent ? 'ABSENT' : (student.scores?.total || 0)
+    if (examDetails?.exam_type === 'internal') {
+      // ── INTERNAL EXAM FORMAT ──
+      // Header: DATE / DEPARTMENT + SUBJECT + SEM
+      // Columns: Serial Number | Roll Number | Full Name | Total Marks
+      const sem = (examDetails?.student_semester || examDetails?.student_year || 'Unknown').toUpperCase();
+
+      const dataRows = students.map((student, index) => {
+        const isAbsent = student.status === 'absent' || student.status === 'registered';
+        const totalMarks = isAbsent ? '-' : (student.scores?.total ?? student.scores?.internal ?? 0);
+        return [index + 1, student.roll_no, student.name, totalMarks];
+      });
+
+      const worksheetData = [
+        [`DATE : ${dateStr}`],
+        [`DEPARTMENT: ${dept} SUBJECT: ${subject}  SEM: ${sem}`],
+        [],
+        ['Serial Number', 'Roll Number', 'Full Name', 'Total Marks'],
+        ...dataRows
       ];
-    });
+      const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
 
-    const worksheetData = [[`DATE : ${dateStr}`], [`DEPARTMENT: ${dept}    SUBJECT: ${subject}    YEAR: ${year}`], [], ['Serial Number', 'Roll Number', 'Full Name', 'Practical', 'Viva', 'Journal', 'Total'], ...dataRows];
-    const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Results");
-    XLSX.writeFile(workbook, `${sessionCode}_Results.xlsx`);
+      // Column widths for readability
+      worksheet['!cols'] = [
+        { wch: 14 }, { wch: 13 }, { wch: 22 }, { wch: 12 }
+      ];
+
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Results');
+      XLSX.writeFile(workbook, `${sessionCode}_Internal_Results.xlsx`);
+    } else {
+      // ── PRACTICAL EXAM FORMAT (original) ──
+      const year = (examDetails?.student_year || 'Unknown').toUpperCase();
+
+      const dataRows = students.map((student, index) => {
+        const isAbsent = student.status === 'absent' || student.status === 'registered';
+        return [
+          index + 1,
+          student.roll_no,
+          student.name,
+          isAbsent ? 'ABSENT' : (student.scores?.practical || 0),
+          isAbsent ? '-' : (student.scores?.viva || 0),
+          isAbsent ? '-' : (student.scores?.journal || 0),
+          isAbsent ? 'ABSENT' : (student.scores?.total || 0)
+        ];
+      });
+
+      const worksheetData = [
+        [`DATE : ${dateStr}`],
+        [`DEPARTMENT: ${dept}    SUBJECT: ${subject}    YEAR: ${year}`],
+        [],
+        ['Serial Number', 'Roll Number', 'Full Name', 'Practical', 'Viva', 'Journal', 'Total'],
+        ...dataRows
+      ];
+      const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Results');
+      XLSX.writeFile(workbook, `${sessionCode}_Results.xlsx`);
+    }
   };
 
   const canChangeSlip = examDetails?.is_active && selectedStudent?.status !== 'submitted';
@@ -862,38 +901,97 @@ const Monitor = () => {
     setBufferError('');
 
     try {
-      const targetMarks = examDetails?.practical_marks;
-      const assignedQuestions = generateSlipForStudent(targetMarks);
+      const isInternal = examDetails?.exam_type === 'internal';
       const studentId = `${sessionCode}_${rollClean}`;
-
-      // ATOMIC: Both the student record and audit log are written in a single batch.
-      // If either write fails, neither is persisted — no orphaned records.
       const batch = writeBatch(db);
-
-      // 1. Student doc (contains both attendance status and score initialization)
       const studentRef = doc(db, 'colleges', tenantId, 'students', studentId);
-      batch.set(studentRef, {
-        roll_no: rollClean,
-        name: nameClean,
-        image: '',
-        session_code: sessionCode,
-        lab_number: examDetails?.lab_number || '',
-        department: examDetails?.student_department || '',
-        year: examDetails?.student_year || '',
-        status: 'registered',
-        assigned_questions: assignedQuestions.map(q => ({
-          question_id: q.question_id,
-          topic: q.topic,
-          marks: q.marks,
-          image: q.image || ''
-        })),
-        answers: {},
-        scores: { practical: 0, viva: 0, journal: 0, total: 0 },
-        is_buffer_student: true,
-        added_at: new Date()
-      });
 
-      // 2. Audit log entry (atomic with student creation — rolls back together)
+      let assignedQuestions = [];
+      let studentDoc = {};
+
+      if (isInternal) {
+        // ── INTERNAL EXAM: Assign MCQ questions from the question bank ──
+        // The questionBank for internal exams has: question_id, question_text, optA-D, answer, marks
+        const targetMarks = parseInt(examDetails?.internal_marks || examDetails?.total_marks || 0);
+
+        // Use the same subset-sum greedy approach as the launch wizard
+        const shuffled = [...questionBank].sort(() => Math.random() - 0.5);
+        const selected = [];
+        let currentSum = 0;
+        for (const q of shuffled) {
+          const m = parseInt(q.marks, 10);
+          if (currentSum + m <= targetMarks) {
+            selected.push(q);
+            currentSum += m;
+            if (currentSum === targetMarks) break;
+          }
+        }
+        // Fisher-Yates shuffle for per-student order randomization
+        for (let i = selected.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [selected[i], selected[j]] = [selected[j], selected[i]];
+        }
+        assignedQuestions = selected;
+
+        // Map to the exact schema used when the internal exam was launched
+        const mappedQuestions = assignedQuestions.map(q => ({
+          question_id: q.question_id || q.id || '',
+          question: q.question_text || q.question || '',
+          question_text: q.question_text || q.question || '',
+          optA: q.optA || '',
+          optB: q.optB || '',
+          optC: q.optC || '',
+          optD: q.optD || '',
+          marks: parseInt(q.marks, 10) || 0,
+          answer: q.answer || ''
+        }));
+
+        studentDoc = {
+          roll_no: rollClean,
+          name: nameClean,
+          image: '',
+          session_code: sessionCode,
+          lab_number: examDetails?.lab_number || '',
+          department: examDetails?.student_department || '',
+          semester: examDetails?.student_semester || '',
+          status: 'registered',
+          exam_type: 'internal',
+          assigned_questions: mappedQuestions,
+          answers: {},
+          scores: { internal: 0, total: 0 },
+          is_buffer_student: true,
+          added_at: new Date()
+        };
+      } else {
+        // ── PRACTICAL EXAM: Original slip-based assignment ──
+        const targetMarks = examDetails?.practical_marks;
+        assignedQuestions = generateSlipForStudent(targetMarks);
+
+        studentDoc = {
+          roll_no: rollClean,
+          name: nameClean,
+          image: '',
+          session_code: sessionCode,
+          lab_number: examDetails?.lab_number || '',
+          department: examDetails?.student_department || '',
+          year: examDetails?.student_year || '',
+          status: 'registered',
+          assigned_questions: assignedQuestions.map(q => ({
+            question_id: q.question_id,
+            topic: q.topic,
+            marks: q.marks,
+            image: q.image || ''
+          })),
+          answers: {},
+          scores: { practical: 0, viva: 0, journal: 0, total: 0 },
+          is_buffer_student: true,
+          added_at: new Date()
+        };
+      }
+
+      // ATOMIC: Both the student record and audit log written in a single batch
+      batch.set(studentRef, studentDoc);
+
       const auditRef = doc(db, 'colleges', tenantId, 'exams', sessionCode, 'buffer_audit', studentId);
       batch.set(auditRef, {
         roll_no: rollClean,
@@ -911,7 +1009,10 @@ const Monitor = () => {
       setGearMenuOpen(false);
 
       const qCount = assignedQuestions.length;
-      alert(`✅ Buffer Student Added!\n\n👤 ${nameClean} (${rollClean})\n📋 ${qCount > 0 ? `${qCount} questions assigned (${targetMarks} marks total)` : '⚠️ No questions assigned — question bank may not have a valid combination for practical marks.'}\n\nThe student can now log in using Session Code: ${sessionCode}`);
+      const marksLabel = isInternal
+        ? (examDetails?.internal_marks || examDetails?.total_marks || '?')
+        : (examDetails?.practical_marks || '?');
+      alert(`✅ Buffer Student Added!\n\n👤 ${nameClean} (${rollClean})\n📋 ${qCount > 0 ? `${qCount} question(s) assigned (${marksLabel} marks total)` : '⚠️ No questions assigned — question bank may not have a valid combination for the configured marks.'}\n\nThe student can now log in using Session Code: ${sessionCode}`);
     } catch (err) {
       setBufferError('Failed to add student: ' + err.message);
     } finally {
@@ -1219,7 +1320,7 @@ const Monitor = () => {
                       {selectedStudent.is_buffer_student && (
                         <span className="bg-amber-100 text-amber-800 text-xs font-bold px-2 py-1 rounded border border-amber-300 flex items-center gap-1">🅱️ Buffer Student</span>
                       )}
-                      {canChangeSlip && !isChangingSlip && <button onClick={handleOpenSlipChange} className="bg-blue-100 hover:bg-blue-200 text-blue-800 px-3 py-1 rounded text-sm font-medium transition">🔄 Change Slip</button>}
+                      {canChangeSlip && !isChangingSlip && examDetails?.exam_type !== 'internal' && <button onClick={handleOpenSlipChange} className="bg-blue-100 hover:bg-blue-200 text-blue-800 px-3 py-1 rounded text-sm font-medium transition">🔄 Change Slip</button>}
                       <button onClick={() => setSelectedStudent(null)} className="text-gray-500 hover:text-gray-700 text-2xl leading-none">×</button>
                     </div>
                   </div>
@@ -1388,24 +1489,26 @@ const Monitor = () => {
                                 <span className="font-bold text-gray-700">Question {index + 1}</span>
                                 <span className="bg-gray-200 text-gray-700 text-xs px-2 py-1 rounded">Max Marks: {question.marks}</span>
                               </div>
-                              <div className="flex gap-2">
-                                <button 
-                                  onClick={() => handleApproveQuestion(answerKey, answer?.is_approved)}
-                                  className={`text-xs font-bold px-3 py-1.5 rounded transition shadow-sm border ${answer?.is_approved ? 'bg-green-600 text-white border-green-700 hover:bg-green-700' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'}`}
-                                >
-                                  {answer?.is_approved ? '✅ Approved' : 'Approve'}
-                                </button>
-                                <button 
-                                  onClick={() => handleRejectQuestion(answerKey, answer?.is_rejected)}
-                                  className={`text-xs font-bold px-3 py-1.5 rounded transition shadow-sm border ${answer?.is_rejected ? 'bg-red-600 text-white border-red-700 hover:bg-red-700' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'}`}
-                                >
-                                  {answer?.is_rejected ? '❌ Rejected' : 'Reject'}
-                                </button>
-                              </div>
+                              {examDetails?.exam_type !== 'internal' && (
+                                <div className="flex gap-2">
+                                  <button 
+                                    onClick={() => handleApproveQuestion(answerKey, answer?.is_approved)}
+                                    className={`text-xs font-bold px-3 py-1.5 rounded transition shadow-sm border ${answer?.is_approved ? 'bg-green-600 text-white border-green-700 hover:bg-green-700' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'}`}
+                                  >
+                                    {answer?.is_approved ? '✅ Approved' : 'Approve'}
+                                  </button>
+                                  <button 
+                                    onClick={() => handleRejectQuestion(answerKey, answer?.is_rejected)}
+                                    className={`text-xs font-bold px-3 py-1.5 rounded transition shadow-sm border ${answer?.is_rejected ? 'bg-red-600 text-white border-red-700 hover:bg-red-700' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'}`}
+                                  >
+                                    {answer?.is_rejected ? '❌ Rejected' : 'Reject'}
+                                  </button>
+                                </div>
+                              )}
                             </div>
 
                             <div className="p-4 space-y-4">
-                              <div className="text-gray-800 font-medium">{question.topic}</div>
+                              <div className="text-gray-800 font-medium">{question.question_text || question.question || question.topic}</div>
 
                               {/* 🌟 QUESTION IMAGE (Added inside old UI structure) */}
                               {question.image && (
@@ -1415,26 +1518,47 @@ const Monitor = () => {
                                 </div>
                               )}
 
-                              {examDetails?.exam_type === 'internal' ? (
-                                <div className="space-y-2 mt-4 bg-gray-50 p-4 rounded-lg border border-gray-200">
-                                  {['A', 'B', 'C', 'D'].map((optKey) => {
-                                    const optVal = question[`opt${optKey}`];
-                                    if (!optVal) return null;
-                                    const isSelected = answer?.selected_option === optVal;
-                                    return (
-                                      <div key={optKey} className={`flex items-center gap-3 p-3 rounded-lg border ${isSelected ? 'bg-blue-100 border-blue-400 text-blue-900 font-bold' : 'bg-white border-gray-200 text-gray-700'}`}>
-                                        <div className={`w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center border-2 ${isSelected ? 'border-blue-600 bg-blue-600' : 'border-gray-400'}`}>
-                                          {isSelected && <div className="w-2.5 h-2.5 rounded-full bg-blue-600" />}
-                                        </div>
-                                        <span>({optKey.toLowerCase()}) {optVal}</span>
+                              {examDetails?.exam_type === 'internal' ? (() => {
+                                // Determine the correct answer letter and option text
+                                const correctLetter = question.answer?.toUpperCase();
+                                const correctOptionText = correctLetter ? question[`opt${correctLetter}`] : null;
+                                const isCorrect = answer?.is_correct;
+                                return (
+                                  <div className="mt-3">
+                                    {/* Auto-grade result badge */}
+                                    {answer?.selected_option && (
+                                      <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-bold mb-3 ${isCorrect ? 'bg-green-100 text-green-800 border border-green-300' : 'bg-red-100 text-red-800 border border-red-300'}`}>
+                                        {isCorrect ? `✅ Correct (+${answer.score || question.marks} marks)` : `❌ Incorrect (0 marks)`}
                                       </div>
-                                    );
-                                  })}
-                                  {!answer?.selected_option && (
-                                    <div className="text-sm text-red-400 italic mt-2">No option selected by student.</div>
-                                  )}
-                                </div>
-                              ) : (
+                                    )}
+                                    <div className="space-y-2 bg-gray-50 p-4 rounded-lg border border-gray-200">
+                                      {['A', 'B', 'C', 'D'].map((optKey) => {
+                                        const optVal = question[`opt${optKey}`];
+                                        if (!optVal) return null;
+                                        const isSelected = answer?.selected_option === optVal;
+                                        const isCorrectOpt = optVal === correctOptionText;
+                                        let rowClass = 'bg-white border-gray-200 text-gray-700';
+                                        if (isCorrectOpt && isSelected) rowClass = 'bg-green-100 border-green-500 text-green-900 font-bold';
+                                        else if (isCorrectOpt) rowClass = 'bg-green-50 border-green-300 text-green-800';
+                                        else if (isSelected) rowClass = 'bg-red-100 border-red-400 text-red-900 font-bold';
+                                        return (
+                                          <div key={optKey} className={`flex items-center gap-3 p-3 rounded-lg border ${rowClass}`}>
+                                            <div className={`w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center border-2 ${isSelected ? (isCorrectOpt ? 'border-green-600 bg-green-600' : 'border-red-500 bg-red-500') : (isCorrectOpt ? 'border-green-400' : 'border-gray-400')}`}>
+                                              {isSelected && <div className="w-2.5 h-2.5 rounded-full bg-white" />}
+                                            </div>
+                                            <span>({optKey.toLowerCase()}) {optVal}</span>
+                                            {isCorrectOpt && <span className="ml-auto text-xs font-bold text-green-700 bg-green-100 px-2 py-0.5 rounded">✓ Correct Answer</span>}
+                                            {isSelected && !isCorrectOpt && <span className="ml-auto text-xs font-bold text-red-700 bg-red-50 px-2 py-0.5 rounded">Student's Choice</span>}
+                                          </div>
+                                        );
+                                      })}
+                                      {!answer?.selected_option && (
+                                        <div className="text-sm text-red-400 italic mt-2">No option selected by student.</div>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })() : (
                                 <>
                                   <div className="bg-gray-50 p-3 rounded border border-gray-200">
                                     <span className="text-xs font-bold text-gray-500 uppercase">Student Answer Code:</span>

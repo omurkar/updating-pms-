@@ -586,7 +586,10 @@ const Dashboard = () => {
   // --- ACTIONS ---
 
   const handleUseTemplate = (template) => {
-    navigate('/teacher/exam-wizard', { state: { template } });
+    const route = template.template_type === 'internal'
+      ? '/teacher/internal-exam-wizard'
+      : '/teacher/exam-wizard';
+    navigate(route, { state: { template } });
   };
 
   const handleDeleteTemplate = async (templateId) => {
@@ -696,6 +699,7 @@ const Dashboard = () => {
         await addDoc(collection(db, 'colleges', tenantId, 'shared_templates'), {
           template_id: sourceId,
           template_name: shareTemplate.template_name,
+          template_type: shareTemplate.template_type || 'practical',
           sender_email: currentUser.email,
           sender_name: senderName,
           original_sender_name: shareTemplate._source === 'shared' ? (originalSenderName || senderName) : senderName,
@@ -707,13 +711,17 @@ const Dashboard = () => {
           labNumber: shareTemplate.labNumber || '',
           studentDepartment: shareTemplate.studentDepartment || '',
           studentYear: shareTemplate.studentYear || '',
+          studentSemester: shareTemplate.studentSemester || '',
           durationHours: shareTemplate.durationHours || '0',
           durationMinutes: shareTemplate.durationMinutes || '0',
           practicalMarks: shareTemplate.practicalMarks || '',
           vivaMarks: shareTemplate.vivaMarks || '',
           journalMarks: shareTemplate.journalMarks || '',
+          internalMarks: shareTemplate.internalMarks || '',
           students: shareTemplate.students || [],
           questions: shareTemplate.questions || [],
+          subjectCount: shareTemplate.subjectCount || 1,
+          subjectTags: shareTemplate.subjectTags || [],
         });
 
         results.success.push(recipientData.name || recipientEmail);
@@ -748,19 +756,27 @@ const Dashboard = () => {
   const handleUseSharedTemplate = (sharedTemplate) => {
     const template = {
       template_name: sharedTemplate.template_name,
+      template_type: sharedTemplate.template_type,
       subjectName: sharedTemplate.subjectName,
       labNumber: sharedTemplate.labNumber,
       studentDepartment: sharedTemplate.studentDepartment,
       studentYear: sharedTemplate.studentYear,
+      studentSemester: sharedTemplate.studentSemester,
       durationHours: sharedTemplate.durationHours,
       durationMinutes: sharedTemplate.durationMinutes,
       practicalMarks: sharedTemplate.practicalMarks,
       vivaMarks: sharedTemplate.vivaMarks,
       journalMarks: sharedTemplate.journalMarks,
+      internalMarks: sharedTemplate.internalMarks,
       students: sharedTemplate.students,
       questions: sharedTemplate.questions,
+      subjectCount: sharedTemplate.subjectCount,
+      subjectTags: sharedTemplate.subjectTags,
     };
-    navigate('/teacher/exam-wizard', { state: { template } });
+    const route = template.template_type === 'internal'
+      ? '/teacher/internal-exam-wizard'
+      : '/teacher/exam-wizard';
+    navigate(route, { state: { template } });
   };
 
   const allDisplayTemplates = [
@@ -879,6 +895,17 @@ const Dashboard = () => {
 
                     {/* Details */}
                     <div className="text-sm text-gray-600 space-y-1 mb-4">
+                      {/* Exam type badge */}
+                      <p className="flex justify-between items-center">
+                        <span>Type:</span>
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full uppercase tracking-wide ${
+                          t.template_type === 'internal'
+                            ? 'bg-purple-100 text-purple-700'
+                            : 'bg-blue-100 text-blue-700'
+                        }`}>
+                          {t.template_type === 'internal' ? 'Internal' : 'Practical'}
+                        </span>
+                      </p>
                       <p className="flex justify-between"><span>Subject:</span> <span className="font-medium">{t.subjectName}</span></p>
                       <p className="flex justify-between"><span>Students:</span> <span className="font-medium">{t.students?.length || 0}</span></p>
                       <p className="flex justify-between"><span>Questions:</span> <span className="font-medium">{t.questions?.length || 0}</span></p>
