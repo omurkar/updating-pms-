@@ -480,6 +480,9 @@ const Dashboard = () => {
   const [sharedLiveSessions, setSharedLiveSessions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showChangePassword, setShowChangePassword] = useState(false);
+  
+  // --- EXAM TYPE GATEWAY STATE ---
+  const [showExamTypeModal, setShowExamTypeModal] = useState(false);
 
   // --- TEMPLATE VIEWER MODAL STATE ---
   const [templateViewerModal, setTemplateViewerModal] = useState(null); // { template, tab: 'students'|'questions' }
@@ -792,7 +795,7 @@ const Dashboard = () => {
           <div className="flex flex-col md:flex-row justify-between items-center mb-8 gap-4">
             <h1 className="text-3xl font-bold text-gray-800">Teacher Dashboard</h1>
             <button
-              onClick={() => navigate('/teacher/exam-wizard')}
+              onClick={() => setShowExamTypeModal(true)}
               className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-bold shadow-md transition transform hover:scale-105"
             >
               + Create New Session (From Scratch)
@@ -1430,6 +1433,61 @@ const Dashboard = () => {
             currentUser={currentUser}
             tenantId={tenantId}
           />
+        )}
+
+        {/* ==================== EXAM TYPE GATEWAY MODAL ==================== */}
+        {showExamTypeModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-8" style={{ animation: 'viewerModalIn 0.25s ease-out' }}>
+              <div className="flex justify-between items-start mb-6">
+                <div>
+                  <h3 className="text-2xl font-bold text-gray-900">Select Exam Type</h3>
+                  <p className="text-gray-500 mt-1">Choose the type of exam you want to create.</p>
+                </div>
+                <button onClick={() => setShowExamTypeModal(false)} className="text-gray-400 hover:text-gray-600 text-2xl font-bold leading-none">&times;</button>
+              </div>
+
+              <div className="grid md:grid-cols-2 gap-6 mb-8">
+                {/* Practical Exam Card */}
+                <label className="relative flex flex-col p-6 rounded-xl border-2 border-gray-200 hover:border-blue-400 cursor-pointer transition group bg-white hover:bg-blue-50">
+                  <div className="flex justify-between items-start mb-4">
+                    <div className="w-12 h-12 bg-blue-100 text-blue-600 rounded-xl flex items-center justify-center text-2xl">
+                      💻
+                    </div>
+                  </div>
+                  <h4 className="text-lg font-bold text-gray-800 mb-2">Practical Exam</h4>
+                  <p className="text-sm text-gray-500 flex-1">
+                    Coding-based practical exams with live slip assignment, code monitoring, and automatic output download.
+                  </p>
+                  <button 
+                    onClick={() => { setShowExamTypeModal(false); navigate('/teacher/exam-wizard'); }}
+                    className="mt-6 w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold transition shadow-sm"
+                  >
+                    Select Practical →
+                  </button>
+                </label>
+
+                {/* Internal Exam Card */}
+                <label className="relative flex flex-col p-6 rounded-xl border-2 border-gray-200 hover:border-purple-400 cursor-pointer transition group bg-white hover:bg-purple-50">
+                  <div className="flex justify-between items-start mb-4">
+                    <div className="w-12 h-12 bg-purple-100 text-purple-600 rounded-xl flex items-center justify-center text-2xl">
+                      📝
+                    </div>
+                  </div>
+                  <h4 className="text-lg font-bold text-gray-800 mb-2">Internal Exam</h4>
+                  <p className="text-sm text-gray-500 flex-1">
+                    Multiple Choice Questions (MCQ) based exams with automated validation, marking, and randomized options.
+                  </p>
+                  <button 
+                    onClick={() => { setShowExamTypeModal(false); navigate('/teacher/internal-exam-wizard'); }}
+                    className="mt-6 w-full py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-bold transition shadow-sm"
+                  >
+                    Select Internal →
+                  </button>
+                </label>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* --- INLINE CSS FOR ANIMATIONS --- */}

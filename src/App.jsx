@@ -93,6 +93,7 @@ import ActivationSuccess from './pages/Admin/ActivationSuccess';
 import TeacherLogin from './pages/Teacher/TeacherLogin';
 import TeacherDashboard from './pages/Teacher/Dashboard';
 import ExamWizard from './pages/Teacher/ExamWizard';
+import InternalExamWizard from './pages/Teacher/InternalExamWizard';
 import Monitor from './pages/Teacher/Monitor';
 import StudentLogin from './pages/Student/StudentLogin';
 import ExamInterface from './pages/Student/ExamInterface';
@@ -126,7 +127,9 @@ function App() {
           <Route path="/teacher/login" element={<TeacherLogin />} />
           <Route path="/teacher/dashboard" element={<TeacherDashboard />} />
           <Route path="/teacher/exam-wizard" element={<ExamWizard />} />
+          <Route path="/teacher/internal-exam-wizard" element={<InternalExamWizard />} />
           <Route path="/teacher/monitor" element={<Monitor />} />
+          <Route path="/teacher/monitor/internal/:sessionCode" element={<Monitor />} />
           
           <Route path="/student/login" element={<StudentLogin />} />
           <Route path="/student/exam" element={<ExamInterface />} />

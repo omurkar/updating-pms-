@@ -216,6 +216,7 @@ const ExamInterface = () => {
   const confirmLogout = () => navigate('/student/login');
 
   const saveCodeToFiles = async () => {
+    if (student.exam_type === 'internal') return; // Don't upload code files for MCQs
     const promises = [];
     student.assigned_questions.forEach((_, index) => {
       const code = answers[`q${index+1}`]?.code;
@@ -380,11 +381,15 @@ const ExamInterface = () => {
           // preserving teacher flags (is_approved, is_rejected) written by the teacher.
           const dotUpdate = { status: 'submitted', submittedAt: new Date().toISOString() };
           Object.entries(answers).forEach(([qKey, qVal]) => {
-            dotUpdate[`answers.${qKey}.code`] = qVal.code || '';
-            dotUpdate[`answers.${qKey}.file_uploaded`] = qVal.file_uploaded || false;
-            dotUpdate[`answers.${qKey}.file_name`] = qVal.file_name || null;
-            dotUpdate[`answers.${qKey}.file_url`] = qVal.file_url || null;
-            dotUpdate[`answers.${qKey}.storage_ref`] = qVal.storage_ref || null;
+            if (student.exam_type === 'internal') {
+              dotUpdate[`answers.${qKey}.selected_option`] = qVal.selected_option || null;
+            } else {
+              dotUpdate[`answers.${qKey}.code`] = qVal.code || '';
+              dotUpdate[`answers.${qKey}.file_uploaded`] = qVal.file_uploaded || false;
+              dotUpdate[`answers.${qKey}.file_name`] = qVal.file_name || null;
+              dotUpdate[`answers.${qKey}.file_url`] = qVal.file_url || null;
+              dotUpdate[`answers.${qKey}.storage_ref`] = qVal.storage_ref || null;
+            }
           });
           transaction.update(studentRef, dotUpdate);
         });
@@ -395,11 +400,15 @@ const ExamInterface = () => {
         // ── BUG 1 FIX: Use dot-notation for approval request too.
         const dotUpdate = { status };
         Object.entries(answers).forEach(([qKey, qVal]) => {
-          dotUpdate[`answers.${qKey}.code`] = qVal.code || '';
-          dotUpdate[`answers.${qKey}.file_uploaded`] = qVal.file_uploaded || false;
-          dotUpdate[`answers.${qKey}.file_name`] = qVal.file_name || null;
-          dotUpdate[`answers.${qKey}.file_url`] = qVal.file_url || null;
-          dotUpdate[`answers.${qKey}.storage_ref`] = qVal.storage_ref || null;
+          if (student.exam_type === 'internal') {
+            dotUpdate[`answers.${qKey}.selected_option`] = qVal.selected_option || null;
+          } else {
+            dotUpdate[`answers.${qKey}.code`] = qVal.code || '';
+            dotUpdate[`answers.${qKey}.file_uploaded`] = qVal.file_uploaded || false;
+            dotUpdate[`answers.${qKey}.file_name`] = qVal.file_name || null;
+            dotUpdate[`answers.${qKey}.file_url`] = qVal.file_url || null;
+            dotUpdate[`answers.${qKey}.storage_ref`] = qVal.storage_ref || null;
+          }
         });
         await updateDoc(studentRef, dotUpdate);
         await showAlert(
@@ -545,65 +554,94 @@ const ExamInterface = () => {
                                 </div>
                             )}
                             
-                            <div className="mb-4">
-                                <label className="block text-gray-600 font-bold mb-2 text-sm uppercase">Type Code / Answer:</label>
-                                <textarea
-                                  value={ans.code||''}
-                                  onChange={e=>handleCodeChange(idx,e.target.value)}
-                                  disabled={(isLocked || ans.is_approved) && !ans.is_rejected}
-                                  onCopy={e=>e.stopPropagation()}
-                                  onPaste={(e) => { handlePaste(idx, e); e.stopPropagation(); }}
-                                  onCut={e=>e.stopPropagation()}
-                                  className="w-full border border-gray-300 rounded-lg px-4 py-3 h-40 font-mono text-sm focus:ring-2 focus:ring-blue-500"
-                                  placeholder="// Type here... (You can also paste an image directly!)"
-                                />
-                            </div>
-                            
-                            <div className="bg-white p-4 rounded-lg border border-gray-200">
-                                <label className="block text-gray-600 font-bold mb-2 text-sm uppercase">{ans.file_uploaded ? "✅ File Uploaded" : "Upload Output (PDF, JPG, or PNG)"}</label>
-                                <div className="flex items-center gap-4">
-                                    <input
-                                      type="file"
-                                      onChange={e=>handleFileUpload(idx,e.target.files[0])}
-                                      disabled={((isLocked || ans.is_approved) && !ans.is_rejected)||uploading}
-                                      accept="application/pdf,image/jpeg,image/png"
-                                      className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-                                    />
+                            {student.exam_type === 'internal' ? (
+                                <div className="mt-4 space-y-3">
+                                    {['A', 'B', 'C', 'D'].map(optKey => {
+                                        const optText = q[`opt${optKey}`];
+                                        if (!optText) return null;
+                                        const isSelected = ans.selected_option === optText;
+                                        return (
+                                            <label key={optKey} className={`flex items-center gap-3 p-4 rounded-xl border-2 cursor-pointer transition ${isSelected ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300 bg-white'}`}>
+                                                <input
+                                                    type="radio"
+                                                    name={`q${idx}`}
+                                                    value={optText}
+                                                    checked={isSelected}
+                                                    onChange={() => {
+                                                        if (isLocked) return;
+                                                        setAnswers(prev => ({ ...prev, [`q${idx+1}`]: { ...prev[`q${idx+1}`], selected_option: optText } }));
+                                                    }}
+                                                    disabled={isLocked}
+                                                    className="w-5 h-5 text-blue-600 border-gray-300 focus:ring-blue-500"
+                                                />
+                                                <span className="font-medium text-gray-700">({optKey.toLowerCase()}) {optText}</span>
+                                            </label>
+                                        );
+                                    })}
                                 </div>
-
-                                {/* ── Feature 1: Upload progress bar ── */}
-                                {uploading && progress && (
-                                  <div className="mt-3">
-                                    <div className="flex justify-between items-center mb-1.5">
-                                      <span className="text-sm font-semibold text-blue-700">{progress.percent}% uploaded</span>
-                                      <span className="text-xs text-gray-500">{formatEta(progress.eta)}</span>
+                            ) : (
+                                <>
+                                    <div className="mb-4">
+                                        <label className="block text-gray-600 font-bold mb-2 text-sm uppercase">Type Code / Answer:</label>
+                                        <textarea
+                                          value={ans.code||''}
+                                          onChange={e=>handleCodeChange(idx,e.target.value)}
+                                          disabled={(isLocked || ans.is_approved) && !ans.is_rejected}
+                                          onCopy={e=>e.stopPropagation()}
+                                          onPaste={(e) => { handlePaste(idx, e); e.stopPropagation(); }}
+                                          onCut={e=>e.stopPropagation()}
+                                          className="w-full border border-gray-300 rounded-lg px-4 py-3 h-40 font-mono text-sm focus:ring-2 focus:ring-blue-500"
+                                          placeholder="// Type here... (You can also paste an image directly!)"
+                                        />
                                     </div>
-                                    <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden shadow-inner">
-                                      <div
-                                        className="progress-bar-fill h-full rounded-full relative"
-                                        style={{
-                                          width: `${progress.percent}%`,
-                                          background: progress.percent < 100
-                                            ? 'linear-gradient(90deg, #3b82f6 0%, #60a5fa 50%, #3b82f6 100%)'
-                                            : 'linear-gradient(90deg, #22c55e 0%, #4ade80 50%, #22c55e 100%)',
-                                        }}
-                                      >
-                                        <div className="absolute inset-0 progress-bar-shimmer rounded-full" />
-                                      </div>
-                                    </div>
-                                  </div>
-                                )}
-                                {uploading && !progress && (
-                                  <div className="text-blue-600 text-sm font-bold animate-pulse mt-2">Preparing upload...</div>
-                                )}
+                                    
+                                    <div className="bg-white p-4 rounded-lg border border-gray-200">
+                                        <label className="block text-gray-600 font-bold mb-2 text-sm uppercase">{ans.file_uploaded ? "✅ File Uploaded" : "Upload Output (PDF, JPG, or PNG)"}</label>
+                                        <div className="flex items-center gap-4">
+                                            <input
+                                              type="file"
+                                              onChange={e=>handleFileUpload(idx,e.target.files[0])}
+                                              disabled={((isLocked || ans.is_approved) && !ans.is_rejected)||uploading}
+                                              accept="application/pdf,image/jpeg,image/png"
+                                              className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                                            />
+                                        </div>
 
-                                {ans.file_uploaded && !uploading && (
-                                <div className="mt-3 flex justify-between bg-green-50 p-2 rounded border border-green-200">
-                                    <span className="text-green-700 text-sm font-medium truncate max-w-[200px]">📄 {ans.file_name}</span>
-                                    {(!(isLocked || ans.is_approved) || ans.is_rejected) && <button onClick={()=>handleRemoveFile(idx)} className="text-xs text-red-600 font-bold border border-red-200 px-2 rounded bg-white">Remove</button>}
-                                </div>
-                                )}
-                            </div>
+                                        {/* ── Feature 1: Upload progress bar ── */}
+                                        {uploading && progress && (
+                                          <div className="mt-3">
+                                            <div className="flex justify-between items-center mb-1.5">
+                                              <span className="text-sm font-semibold text-blue-700">{progress.percent}% uploaded</span>
+                                              <span className="text-xs text-gray-500">{formatEta(progress.eta)}</span>
+                                            </div>
+                                            <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden shadow-inner">
+                                              <div
+                                                className="progress-bar-fill h-full rounded-full relative"
+                                                style={{
+                                                  width: `${progress.percent}%`,
+                                                  background: progress.percent < 100
+                                                    ? 'linear-gradient(90deg, #3b82f6 0%, #60a5fa 50%, #3b82f6 100%)'
+                                                    : 'linear-gradient(90deg, #22c55e 0%, #4ade80 50%, #22c55e 100%)',
+                                                }}
+                                              >
+                                                <div className="absolute inset-0 progress-bar-shimmer rounded-full" />
+                                              </div>
+                                            </div>
+                                          </div>
+                                        )}
+                                        {uploading && !progress && (
+                                          <div className="text-blue-600 text-sm font-bold animate-pulse mt-2">Preparing upload...</div>
+                                        )}
+
+                                        {ans.file_uploaded && !uploading && (
+                                        <div className="mt-3 flex justify-between bg-green-50 p-2 rounded border border-green-200">
+                                            <span className="text-green-700 text-sm font-medium truncate max-w-[200px]">📄 {ans.file_name}</span>
+                                            {(!(isLocked || ans.is_approved) || ans.is_rejected) && <button onClick={()=>handleRemoveFile(idx)} className="text-xs text-red-600 font-bold border border-red-200 px-2 rounded bg-white">Remove</button>}
+                                        </div>
+                                        )}
+                                    </div>
+                                </>
+                            )}
                         </div>
                     );
                     })}

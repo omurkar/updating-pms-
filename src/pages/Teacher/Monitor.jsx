@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useParams } from 'react-router-dom';
 import { collection, query, where, onSnapshot, doc, updateDoc, getDocs, writeBatch, deleteField, setDoc, addDoc, serverTimestamp } from 'firebase/firestore';
 import { ref, deleteObject, listAll, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../../firebase';
@@ -13,8 +13,9 @@ import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 
 const Monitor = () => {
+  const { sessionCode: paramsSessionCode } = useParams();
   const [searchParams] = useSearchParams();
-  const sessionCode = searchParams.get('session') || '';
+  const sessionCode = paramsSessionCode || searchParams.get('session') || '';
   const { tenantId } = useTenant();
   const { currentUser } = useAuth();
   const [students, setStudents] = useState([]);
@@ -510,13 +511,15 @@ const Monitor = () => {
       if (examDetails?.viva_marks !== undefined && viva > examDetails.viva_marks) { alert(`Viva marks cannot exceed ${examDetails.viva_marks}.`); return; }
       if (examDetails?.journal_marks !== undefined && journal > examDetails.journal_marks) { alert(`Journal marks cannot exceed ${examDetails.journal_marks}.`); return; }
 
-      const grandTotal = totalPractical + viva + journal;
+      const grandTotal = examDetails?.exam_type === 'internal' 
+        ? totalPractical 
+        : totalPractical + viva + journal;
 
       await updateDoc(doc(db, 'colleges', tenantId, 'students', selectedStudent.id), {
         answers: updatedAnswers,
         'scores.practical': totalPractical,
-        'scores.viva': viva,
-        'scores.journal': journal,
+        'scores.viva': examDetails?.exam_type === 'internal' ? 0 : viva,
+        'scores.journal': examDetails?.exam_type === 'internal' ? 0 : journal,
         'scores.total': grandTotal,
         is_graded: true
       });
@@ -1412,36 +1415,59 @@ const Monitor = () => {
                                 </div>
                               )}
 
-                              <div className="bg-gray-50 p-3 rounded border border-gray-200">
-                                <span className="text-xs font-bold text-gray-500 uppercase">Student Answer Code:</span>
-                                <pre className="mt-1 text-sm overflow-x-auto whitespace-pre-wrap font-mono text-gray-800 bg-white p-2 rounded border border-gray-100">
-                                  {answer?.code || <span className="text-gray-400 italic">No answer text provided yet.</span>}
-                                </pre>
-                              </div>
-
-                              <div className="flex items-center gap-4">
-                                {answer?.file_url ? (
-                                  <a href={answer.file_url} target="_blank" rel="noopener noreferrer"
-                                    className="flex items-center gap-2 bg-blue-100 text-blue-800 border border-blue-300 px-4 py-2 rounded-lg hover:bg-blue-200 transition font-bold shadow-sm">
-                                    <span>📄</span> View Uploaded PDF
-                                  </a>
-                                ) : answer?.file_uploaded === 'downloaded' || answer?.file_name ? (
-                                  <span className="text-sm text-green-700 border border-green-200 bg-green-50 px-3 py-2 rounded flex items-center gap-2">
-                                    <span>✅</span> <strong>{answer.file_name || 'File'}</strong> — Already downloaded via session files
-                                  </span>
-                                ) : (
-                                  <span className="text-sm text-red-400 italic border border-red-100 bg-red-50 px-3 py-2 rounded">No PDF Uploaded</span>
-                                )}
-                              </div>
-
-                              {canGradePractical && (
-                                <div className="mt-4 pt-4 border-t border-gray-100 flex justify-end gap-6 bg-yellow-50 -mx-4 -mb-4 p-4">
-                                  <div className="flex items-center gap-3 flex-shrink-0">
-                                    <label className="font-bold text-gray-700">Marks for Q{index + 1}:</label>
-                                    <input type="number" min="0" max={question.marks} value={score} onChange={(e) => handleQuestionScoreChange(answerKey, e.target.value, question.marks)} className="w-24 border-2 border-yellow-300 rounded-lg px-3 py-2 text-center font-bold text-lg focus:outline-none focus:border-yellow-500 bg-white" placeholder="0" />
-                                    <span className="text-gray-500 text-sm">/ {question.marks}</span>
-                                  </div>
+                              {examDetails?.exam_type === 'internal' ? (
+                                <div className="space-y-2 mt-4 bg-gray-50 p-4 rounded-lg border border-gray-200">
+                                  {['A', 'B', 'C', 'D'].map((optKey) => {
+                                    const optVal = question[`opt${optKey}`];
+                                    if (!optVal) return null;
+                                    const isSelected = answer?.selected_option === optVal;
+                                    return (
+                                      <div key={optKey} className={`flex items-center gap-3 p-3 rounded-lg border ${isSelected ? 'bg-blue-100 border-blue-400 text-blue-900 font-bold' : 'bg-white border-gray-200 text-gray-700'}`}>
+                                        <div className={`w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center border-2 ${isSelected ? 'border-blue-600 bg-blue-600' : 'border-gray-400'}`}>
+                                          {isSelected && <div className="w-2.5 h-2.5 rounded-full bg-blue-600" />}
+                                        </div>
+                                        <span>({optKey.toLowerCase()}) {optVal}</span>
+                                      </div>
+                                    );
+                                  })}
+                                  {!answer?.selected_option && (
+                                    <div className="text-sm text-red-400 italic mt-2">No option selected by student.</div>
+                                  )}
                                 </div>
+                              ) : (
+                                <>
+                                  <div className="bg-gray-50 p-3 rounded border border-gray-200">
+                                    <span className="text-xs font-bold text-gray-500 uppercase">Student Answer Code:</span>
+                                    <pre className="mt-1 text-sm overflow-x-auto whitespace-pre-wrap font-mono text-gray-800 bg-white p-2 rounded border border-gray-100">
+                                      {answer?.code || <span className="text-gray-400 italic">No answer text provided yet.</span>}
+                                    </pre>
+                                  </div>
+
+                                  <div className="flex items-center gap-4">
+                                    {answer?.file_url ? (
+                                      <a href={answer.file_url} target="_blank" rel="noopener noreferrer"
+                                        className="flex items-center gap-2 bg-blue-100 text-blue-800 border border-blue-300 px-4 py-2 rounded-lg hover:bg-blue-200 transition font-bold shadow-sm">
+                                        <span>📄</span> View Uploaded PDF
+                                      </a>
+                                    ) : answer?.file_uploaded === 'downloaded' || answer?.file_name ? (
+                                      <span className="text-sm text-green-700 border border-green-200 bg-green-50 px-3 py-2 rounded flex items-center gap-2">
+                                        <span>✅</span> <strong>{answer.file_name || 'File'}</strong> — Already downloaded via session files
+                                      </span>
+                                    ) : (
+                                      <span className="text-sm text-red-400 italic border border-red-100 bg-red-50 px-3 py-2 rounded">No PDF Uploaded</span>
+                                    )}
+                                  </div>
+                                  
+                                  {canGradePractical && (
+                                    <div className="mt-4 pt-4 border-t border-gray-100 flex justify-end gap-6 bg-yellow-50 -mx-4 -mb-4 p-4">
+                                      <div className="flex items-center gap-3 flex-shrink-0">
+                                        <label className="font-bold text-gray-700">Marks for Q{index + 1}:</label>
+                                        <input type="number" min="0" max={question.marks} value={score} onChange={(e) => handleQuestionScoreChange(answerKey, e.target.value, question.marks)} className="w-24 border-2 border-yellow-300 rounded-lg px-3 py-2 text-center font-bold text-lg focus:outline-none focus:border-yellow-500 bg-white" placeholder="0" />
+                                        <span className="text-gray-500 text-sm">/ {question.marks}</span>
+                                      </div>
+                                    </div>
+                                  )}
+                                </>
                               )}
                             </div>
                           </div>
@@ -1451,19 +1477,23 @@ const Monitor = () => {
                       <div className="bg-gray-800 text-white p-6 rounded-xl shadow-lg mt-8">
                         <h3 className="font-bold text-xl mb-4 border-b border-gray-600 pb-2">Final Grading Summary</h3>
 
-                        <div className="grid md:grid-cols-3 gap-6 mb-6">
-                          <div>
-                            <label className="block text-gray-400 text-sm font-bold mb-2">Viva Marks (Max: {examDetails?.viva_marks || 0})</label>
-                            <input type="number" value={vivaMarks} onChange={(e) => setVivaMarks(e.target.value)} className="w-full bg-gray-700 border border-gray-600 text-white rounded-lg px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="0" />
-                          </div>
-                          <div>
-                            <label className="block text-gray-400 text-sm font-bold mb-2">Journal Marks (Max: {examDetails?.journal_marks || 0})</label>
-                            <input type="number" value={journalMarks} onChange={(e) => setJournalMarks(e.target.value)} className="w-full bg-gray-700 border border-gray-600 text-white rounded-lg px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="0" />
-                          </div>
+                        <div className={`grid ${examDetails?.exam_type === 'internal' ? 'md:grid-cols-1' : 'md:grid-cols-3'} gap-6 mb-6`}>
+                          {examDetails?.exam_type !== 'internal' && (
+                            <>
+                              <div>
+                                <label className="block text-gray-400 text-sm font-bold mb-2">Viva Marks (Max: {examDetails?.viva_marks || 0})</label>
+                                <input type="number" value={vivaMarks} onChange={(e) => setVivaMarks(e.target.value)} className="w-full bg-gray-700 border border-gray-600 text-white rounded-lg px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="0" />
+                              </div>
+                              <div>
+                                <label className="block text-gray-400 text-sm font-bold mb-2">Journal Marks (Max: {examDetails?.journal_marks || 0})</label>
+                                <input type="number" value={journalMarks} onChange={(e) => setJournalMarks(e.target.value)} className="w-full bg-gray-700 border border-gray-600 text-white rounded-lg px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="0" />
+                              </div>
+                            </>
+                          )}
                           <div className="bg-gray-700 rounded-lg p-3 flex flex-col justify-center items-center">
                             <span className="text-gray-400 text-xs uppercase">Total Score</span>
                             <span className="text-3xl font-bold text-green-400">
-                              {(canGradePractical ? Object.values(questionScores).reduce((a, b) => a + (parseInt(b) || 0), 0) : (selectedStudent.scores?.practical || 0)) + (parseInt(vivaMarks) || 0) + (parseInt(journalMarks) || 0)}
+                              {(canGradePractical ? Object.values(questionScores).reduce((a, b) => a + (parseInt(b) || 0), 0) : (selectedStudent.scores?.practical || 0)) + (examDetails?.exam_type === 'internal' ? 0 : ((parseInt(vivaMarks) || 0) + (parseInt(journalMarks) || 0)))}
                             </span>
                           </div>
                         </div>
