@@ -383,6 +383,17 @@ const ExamInterface = () => {
           Object.entries(answers).forEach(([qKey, qVal]) => {
             if (student.exam_type === 'internal') {
               dotUpdate[`answers.${qKey}.selected_option`] = qVal.selected_option || null;
+              // ── AUTO-GRADING: compare selected option text to correct answer ──
+              const qIndex = parseInt(qKey.replace('q', ''), 10) - 1;
+              const questionObj = student.assigned_questions?.[qIndex];
+              if (questionObj) {
+                const correctLetter = questionObj.answer?.toUpperCase(); // 'A','B','C','D'
+                const correctOptionText = questionObj[`opt${correctLetter}`];
+                const isCorrect = !!(qVal.selected_option && correctOptionText &&
+                  qVal.selected_option === correctOptionText);
+                dotUpdate[`answers.${qKey}.is_correct`] = isCorrect;
+                dotUpdate[`answers.${qKey}.score`] = isCorrect ? (parseInt(questionObj.marks, 10) || 0) : 0;
+              }
             } else {
               dotUpdate[`answers.${qKey}.code`] = qVal.code || '';
               dotUpdate[`answers.${qKey}.file_uploaded`] = qVal.file_uploaded || false;
@@ -391,6 +402,24 @@ const ExamInterface = () => {
               dotUpdate[`answers.${qKey}.storage_ref`] = qVal.storage_ref || null;
             }
           });
+
+          // ── AUTO-GRADING TOTAL for internal exams ──
+          if (student.exam_type === 'internal') {
+            let totalScore = 0;
+            student.assigned_questions?.forEach((questionObj, qIndex) => {
+              const qKey = `q${qIndex + 1}`;
+              const qVal = answers[qKey];
+              const correctLetter = questionObj.answer?.toUpperCase();
+              const correctOptionText = questionObj[`opt${correctLetter}`];
+              const isCorrect = !!(qVal?.selected_option && correctOptionText &&
+                qVal.selected_option === correctOptionText);
+              if (isCorrect) totalScore += (parseInt(questionObj.marks, 10) || 0);
+            });
+            dotUpdate['scores.internal'] = totalScore;
+            dotUpdate['scores.total'] = totalScore;
+            dotUpdate['is_graded'] = true;
+          }
+
           transaction.update(studentRef, dotUpdate);
         });
         await showAlert('Submitted!', 'Your exam has been submitted successfully.', 'success');
@@ -545,7 +574,10 @@ const ExamInterface = () => {
                                 <span className="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-1 rounded">Max: {q.marks}</span>
                             </div>
                             
-                            <div className="font-medium text-gray-800 mb-4 text-lg">{q.topic}</div>
+                            {/* QUESTION TEXT */}
+                            <div className="font-semibold text-gray-900 mb-4 text-base leading-relaxed">
+                              {q.question || q.topic}
+                            </div>
 
                             {/* QUESTION IMAGE */}
                             {q.image && (
@@ -648,39 +680,58 @@ const ExamInterface = () => {
                 </div>
                 </div>
 
-                {/* ── TASK 2: Dynamic Action Buttons ── */}
+                {/* ── ACTION BUTTONS ── */}
                 <div className="bg-white rounded-lg shadow-md p-6 flex justify-between gap-4 border-t-2 border-gray-100">
-                    {/* LEFT: Ask for Approval — shown when student has work needing review */}
-                    <div>
-                      {showAskApprovalBtn && (
-                        <button
-                          onClick={()=>handleAction('approval_requested')}
-                          disabled={isSubmitting||isUploading}
-                          className="bg-yellow-500 hover:bg-yellow-600 text-white px-6 py-3 rounded-lg font-bold transition disabled:opacity-50"
-                        >
-                          {anyQuestionRejected ? '🔁 Re-submit for Approval' : 'Ask for Approval'}
-                        </button>
-                      )}
-                    </div>
-
-                    {/* RIGHT: Status indicators and Final Submit */}
-                    <div className="flex items-center gap-3">
-                      {showPendingBanner && (
-                        <div className="bg-yellow-100 text-yellow-800 px-6 py-3 rounded-lg font-bold">⏳ Pending Approval</div>
-                      )}
-                      {student.status === 'submitted' && (
-                        <div className="bg-green-100 text-green-800 px-6 py-3 rounded-lg font-bold">✅ Submitted</div>
-                      )}
-                      {showFinalSubmitBtn && (
-                        <button
-                          onClick={()=>handleAction('submitted')}
-                          disabled={isSubmitting||isUploading}
-                          className="bg-green-600 hover:bg-green-700 text-white px-8 py-3 rounded-lg font-bold shadow-lg transition disabled:opacity-50"
-                        >
-                          ✅ Final Submit
-                        </button>
-                      )}
-                    </div>
+                    {student.exam_type === 'internal' ? (
+                      /* ── INTERNAL EXAM: Single direct submit (auto-graded, no approval flow) ── */
+                      <div className="w-full flex justify-end items-center gap-4">
+                        {student.status === 'submitted' ? (
+                          <div className="bg-green-100 text-green-800 px-6 py-3 rounded-lg font-bold">✅ Submitted & Graded</div>
+                        ) : (
+                          <button
+                            onClick={() => handleAction('submitted')}
+                            disabled={isSubmitting || isLocked}
+                            className="bg-green-600 hover:bg-green-700 text-white px-8 py-3 rounded-lg font-bold shadow-lg transition disabled:opacity-50"
+                          >
+                            {isSubmitting ? 'Submitting...' : '✅ Submit Exam'}
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      /* ── PRACTICAL EXAM: Original approval-flow buttons ── */
+                      <>
+                        {/* LEFT: Ask for Approval */}
+                        <div>
+                          {showAskApprovalBtn && (
+                            <button
+                              onClick={() => handleAction('approval_requested')}
+                              disabled={isSubmitting || isUploading}
+                              className="bg-yellow-500 hover:bg-yellow-600 text-white px-6 py-3 rounded-lg font-bold transition disabled:opacity-50"
+                            >
+                              {anyQuestionRejected ? '🔁 Re-submit for Approval' : 'Ask for Approval'}
+                            </button>
+                          )}
+                        </div>
+                        {/* RIGHT: Status indicators and Final Submit */}
+                        <div className="flex items-center gap-3">
+                          {showPendingBanner && (
+                            <div className="bg-yellow-100 text-yellow-800 px-6 py-3 rounded-lg font-bold">⏳ Pending Approval</div>
+                          )}
+                          {student.status === 'submitted' && (
+                            <div className="bg-green-100 text-green-800 px-6 py-3 rounded-lg font-bold">✅ Submitted</div>
+                          )}
+                          {showFinalSubmitBtn && (
+                            <button
+                              onClick={() => handleAction('submitted')}
+                              disabled={isSubmitting || isUploading}
+                              className="bg-green-600 hover:bg-green-700 text-white px-8 py-3 rounded-lg font-bold shadow-lg transition disabled:opacity-50"
+                            >
+                              ✅ Final Submit
+                            </button>
+                          )}
+                        </div>
+                      </>
+                    )}
                 </div>
             </div>
 

@@ -409,6 +409,7 @@ const ExamWizard = () => {
     try {
         await addDoc(collection(db, 'colleges', tenantId, 'exam_templates'), {
             template_name: templateName,
+            template_type: 'practical',
             teacher_email: currentUser.email,
             created_at: serverTimestamp(),
             subjectName, labNumber, studentDepartment, studentYear,
