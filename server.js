@@ -912,7 +912,8 @@ app.use(express.static(path.join(__dirname, 'dist')));
 
 // SPA catch-all: any route not matched by an API above returns index.html
 // so React Router can handle client-side navigation (fixes 404 on /activate etc.)
-app.get('*', (req, res) => {
+// NOTE: Using regex instead of '*' because Express 5 dropped bare wildcard support
+app.get(/(.*)/, (req, res) => {
   const indexPath = path.join(__dirname, 'dist', 'index.html');
   if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath);
