@@ -50,6 +50,7 @@ app.set('trust proxy', 1);
 const allowedOrigins = [
   'http://localhost:5173',  // Vite dev server
   'http://localhost:4173',  // Vite preview
+  'http://localhost:3000',  // CRA / alternate dev server
   'https://nextsolvespms.onrender.com', // Live frontend (solves)
   'https://nextslovespms.onrender.com', // Live frontend (sloves)
   process.env.ALLOWED_ORIGIN, // Production origin from .env
@@ -902,6 +903,22 @@ app.post('/api/secondary-admin/set-password', secondaryAdminLimiter, async (req,
   } catch (err) {
     console.error('[SecondaryAdmin] Step 4 error:', err.message);
     res.status(500).json({ error: 'Failed to set password: ' + err.message });
+  }
+});
+
+// ── Serve React frontend (Vite build output) ──────────────────────────────
+// Serve static assets from the dist/ folder produced by `vite build`
+app.use(express.static(path.join(__dirname, 'dist')));
+
+// SPA catch-all: any route not matched by an API above returns index.html
+// so React Router can handle client-side navigation (fixes 404 on /activate etc.)
+app.get('*', (req, res) => {
+  const indexPath = path.join(__dirname, 'dist', 'index.html');
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    // dist not built yet (dev mode) — just 404 gracefully
+    res.status(404).json({ error: 'Frontend not built. Run `npm run build` first.' });
   }
 });
 
