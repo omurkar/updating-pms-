@@ -50,7 +50,8 @@ app.set('trust proxy', 1);
 const allowedOrigins = [
   'http://localhost:5173',  // Vite dev server
   'http://localhost:4173',  // Vite preview
-  'https://nextsolvespms.onrender.com', // Live frontend
+  'https://nextsolvespms.onrender.com', // Live frontend (solves)
+  'https://nextslovespms.onrender.com', // Live frontend (sloves)
   process.env.ALLOWED_ORIGIN, // Production origin from .env
 ].filter(Boolean);
 
