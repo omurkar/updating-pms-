@@ -58,14 +58,19 @@ const allowedOrigins = [
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like Postman or Render health checks)
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin) return callback(null, true);
+
+    const normalizedOrigin = origin.endsWith('/') ? origin.slice(0, -1) : origin;
+    if (allowedOrigins.includes(normalizedOrigin)) {
       callback(null, true);
     } else {
-      callback(new Error('CORS: Origin not allowed'));
+      console.warn(`[CORS Blocked] Origin not allowed: "${origin}"`);
+      // Return false instead of Error to send standard CORS headers denial rather than a 500 Server Error
+      callback(null, false);
     }
   },
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'x-folder-path'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-folder-path'],
   credentials: true
 }));
 app.use(express.json());
